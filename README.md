@@ -23,6 +23,15 @@ npm test
 
 ```bash
 codex-helper --help
+codex-helper auth status
+codex-helper auth status --auth-file ~/.codex/auth.json
+codex-helper auth status --json
+codex-helper auth save
+codex-helper auth list
+codex-helper auth select
+codex-helper auth select --account-id <account-id>
+codex-helper auth remove
+codex-helper auth remove --account-id <account-id> --yes
 codex-helper doctor
 codex-helper stat
 codex-helper stat --start 2026-05-01 --end 2026-05-12 --group-by day
@@ -43,6 +52,48 @@ codex-helper stat sessions session-a --last 30d
 codex-helper stat sessions session-a --format json --limit 20
 codex-helper stat sessions --last 30d --format json
 ```
+
+### Auth
+
+Syntax:
+
+```bash
+codex-helper auth status
+codex-helper auth save
+codex-helper auth list
+codex-helper auth select
+codex-helper auth remove
+```
+
+Auth commands read `auth.json` from `$CODEX_HOME/auth.json` by default, or
+`~/.codex/auth.json` when `CODEX_HOME` is not set. It expects the fixed Codex
+auth structure and decodes `tokens.id_token` without verifying the signature.
+`auth status` prints only the key account fields: account ID, key ID, name,
+email, user ID, plan, and organizations. It never prints the raw ID token.
+
+`auth save` persists the entire current `auth.json` under the profile store
+using the account ID as the unique key. By default the store is
+`<auth-file-dir>/auth-profiles`, so `--auth-file` keeps profiles next to that
+specific file; without `--auth-file`, the store is `$CODEX_HOME/auth-profiles`.
+`auth list` only shows the current profile and readable persisted profiles. If a
+persisted profile cannot be decoded, it is listed under skipped profiles instead
+of failing the whole command. `auth select` switches to a persisted profile; in
+an interactive terminal it uses an Up/Down/Enter selection list, saves the
+current `auth.json` first, then replaces `auth.json` with the selected persisted
+content. `auth remove` shows an interactive multi-select list where Space
+toggles entries and Enter confirms the selection, then asks for a second
+confirmation before deleting persisted copies.
+
+Options:
+
+| Option | Behavior |
+| --- | --- |
+| `--auth-file <path>` | Use a specific `auth.json` file. |
+| `--codex-home <path>` | Read `<path>/auth.json`. Ignored when `--auth-file` is supplied. |
+| `--store-dir <path>` | Use a specific auth profile store directory for `save`, `list`, `select`, and `remove`. |
+| `--json` | Include the decoded JWT header and claims as JSON. |
+| `--account-id <id>` | Select or remove a specific persisted profile. |
+| `--yes` | Skip confirmation when removing with `--account-id`. |
 
 ### Stat
 
