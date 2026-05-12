@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 
-import { confirm, input, select } from "@inquirer/prompts";
 import { Command } from "commander";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ora from "ora";
 import pc from "picocolors";
 import {
-  createProjectSummary,
-  formatProjectSummary,
-  type ProjectSummary
-} from "./index.js";
+  formatUsageSessionDetail,
+  formatUsageSessions,
+  formatUsageStats,
+  readCodexUsageSessionDetail,
+  readCodexUsageSessions,
+  readCodexUsageStats,
+  resolveStatRangeOptions,
+  resolveStatOptions
+} from "./stats.js";
 
 const packageVersion = readPackageVersion();
 
@@ -34,76 +38,156 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
       output.write(`${pc.green("Node.js")} ${process.version}\n`);
     });
 
-  program
-    .command("init")
-    .description("Collect basic project preferences interactively.")
-    .option("-n, --name <name>", "project name")
-    .option("-p, --package-manager <manager>", "package manager")
-    .option("--yes", "accept defaults and skip prompts")
-    .action(async (commandOptions: {
-      name?: string;
-      packageManager?: string;
-      yes?: boolean;
-    }) => {
-      const summary = await collectProjectSummary(commandOptions);
-      output.write(`${formatProjectSummary(summary)}\n`);
-    });
+  const statCommand = program
+    .command("stat [view] [session]")
+    .description("Show Codex session token usage statistics.")
+    .option("-g, --group-by <group>", "aggregation: hour, day, week, month, model, cwd")
+    .option("--sort <sort>", "sort rows by: time, tokens, credits, calls, sessions")
+    .option("--limit <n>", "maximum number of rows to show")
+    .option("--top <n>", "number of sessions to show when view is sessions")
+    .option("--verbose", "show scan and parsing diagnostics");
+  addStatRangeOptions(statCommand);
+  addStatFormatOptions(statCommand);
+  statCommand.action(
+    async (
+      view: string | undefined,
+      session: string | undefined,
+      options: StatCommandOptions & { top?: string }
+    ) => {
+      const commandOptions = {
+        ...options,
+        verbose: program.opts<{ verbose?: boolean }>().verbose === true || options.verbose === true
+      };
+      let spinner: ReturnType<typeof ora> | undefined;
+
+      try {
+        if (view === undefined) {
+          const statOptions = resolveStatOptions(commandOptions);
+          spinner =
+            statOptions.format === "table" ? ora("Reading Codex session usage").start() : undefined;
+          const report = await readCodexUsageStats(statOptions);
+          spinner?.succeed(`Read ${report.totals.calls} usage events.`);
+          output.write(
+            withTrailingNewline(
+              formatUsageStats(report, statOptions.format, { verbose: statOptions.verbose })
+            )
+          );
+          return;
+        }
+
+        if (view === "sessions") {
+          const sessionOptions = resolveStatRangeOptions(commandOptions);
+
+          if (session !== undefined) {
+            spinner =
+              sessionOptions.format === "table"
+                ? ora("Reading Codex session usage").start()
+                : undefined;
+            const report = await readCodexUsageSessionDetail(sessionOptions, session);
+            spinner?.succeed(`Read ${report.totals.calls} usage events.`);
+            output.write(
+              withTrailingNewline(
+                formatUsageSessionDetail(report, sessionOptions.format, {
+                  verbose: sessionOptions.verbose
+                })
+              )
+            );
+            return;
+          }
+
+          const top =
+            commandOptions.top === undefined
+              ? sessionOptions.limit ?? 10
+              : parseTopLimit(commandOptions.top);
+          spinner =
+            sessionOptions.format === "table" ? ora("Reading Codex session usage").start() : undefined;
+          const report = await readCodexUsageSessions(sessionOptions, top);
+          spinner?.succeed(`Read ${report.totals.calls} usage events.`);
+          output.write(
+            withTrailingNewline(
+              formatUsageSessions(report, sessionOptions.format, { verbose: sessionOptions.verbose })
+            )
+          );
+          return;
+        }
+
+        throw new Error(`Unknown stat view: ${view}`);
+      } catch (error) {
+        spinner?.fail("Failed to read Codex session usage.");
+        throw error;
+      }
+    }
+  );
 
   return program;
 }
 
-export async function collectProjectSummary(options: {
-  name?: string;
-  packageManager?: string;
-  yes?: boolean;
-}): Promise<ProjectSummary> {
-  if (options.yes) {
-    return createProjectSummary(
-      options.name ?? "codex-helper",
-      options.packageManager ?? "npm"
-    );
+type StatCommandOptions = {
+  start?: string;
+  end?: string;
+  groupBy?: string;
+  format?: string;
+  codexHome?: string;
+  sessionsDir?: string;
+  today?: boolean;
+  yesterday?: boolean;
+  month?: boolean;
+  last?: string;
+  sort?: string;
+  limit?: string;
+  verbose?: boolean;
+  json?: boolean;
+};
+
+function addStatRangeOptions(command: Command) {
+  command
+    .option("--start <time>", "start time, defaults to one week before --end")
+    .option("--end <time>", "end time, defaults to now")
+    .option("--today", "use today as the time range")
+    .option("--yesterday", "use yesterday as the time range")
+    .option("--month", "use the current calendar month as the time range")
+    .option("--last <duration>", "use a recent duration like 12h, 7d, 2w, or 1mo")
+    .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
+    .option("--sessions-dir <path>", "Codex sessions directory");
+}
+
+function addStatFormatOptions(command: Command) {
+  command
+    .option("-f, --format <format>", "output format: table, json, csv, markdown", "table")
+    .option("--json", "print JSON; alias for --format json");
+}
+
+function parseTopLimit(value: string | undefined) {
+  const limit = Number(value ?? "10");
+
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new Error("Invalid --top value. Expected a positive integer.");
   }
 
-  const name =
-    options.name ??
-    (await input({
-      message: "Project name",
-      default: "codex-helper"
-    }));
+  return limit;
+}
 
-  const packageManager =
-    options.packageManager ??
-    (await select({
-      message: "Package manager",
-      choices: [
-        { name: "npm", value: "npm" },
-        { name: "pnpm", value: "pnpm" },
-        { name: "yarn", value: "yarn" }
-      ],
-      default: "npm"
-    }));
-
-  const shouldContinue = await confirm({
-    message: "Generate project summary?",
-    default: true
-  });
-
-  if (!shouldContinue) {
-    throw new Error("Initialization cancelled.");
-  }
-
-  return createProjectSummary(name, packageManager);
+function withTrailingNewline(text: string) {
+  return text.endsWith("\n") ? text : `${text}\n`;
 }
 
 export async function run(argv = process.argv) {
   await createProgram().parseAsync(argv);
 }
 
-function isMainModule() {
-  return (
-    process.argv[1] !== undefined &&
-    fileURLToPath(import.meta.url) === resolve(process.argv[1])
-  );
+export function isMainModule(argvPath = process.argv[1]) {
+  if (argvPath === undefined) {
+    return false;
+  }
+
+  const modulePath = fileURLToPath(import.meta.url);
+  const resolvedArgvPath = resolve(argvPath);
+
+  try {
+    return realpathSync(modulePath) === realpathSync(resolvedArgvPath);
+  } catch {
+    return modulePath === resolvedArgvPath;
+  }
 }
 
 function readPackageVersion() {

@@ -16,7 +16,7 @@
     }
   },
   "bin": {
-    "codex-helper": "./dist/cli.mjs"
+    "codex-helper": "dist/cli.mjs"
   },
   "files": [
     "dist",
@@ -42,7 +42,6 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@inquirer/prompts": "^8.4.3",
     "commander": "^14.0.3",
     "ora": "^9.4.0",
     "picocolors": "^1.1.1"
