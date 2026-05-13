@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -22,6 +22,7 @@ export type UsageRecord = {
   timestamp: Date;
   sessionId: string;
   model: string;
+  reasoningEffort?: string;
   cwd: string;
   filePath: string;
   usage: TokenUsage;
@@ -37,8 +38,13 @@ export type StatRangeOptions = {
   verbose: boolean;
 };
 
+export type UsageFileScanOptions = {
+  scanAllFiles?: boolean;
+};
+
 export type StatOptions = StatRangeOptions & {
   groupBy: StatGroupBy;
+  includeReasoningEffort: boolean;
 };
 
 export type RawStatOptions = {
@@ -51,6 +57,8 @@ export type RawStatOptions = {
   today?: boolean;
   yesterday?: boolean;
   month?: boolean;
+  all?: boolean;
+  reasoningEffort?: boolean;
   last?: string;
   sort?: string;
   limit?: string | number;
@@ -73,6 +81,7 @@ export type UsageStatsReport = {
   start: Date;
   end: Date;
   groupBy: StatGroupBy;
+  includeReasoningEffort: boolean;
   sortBy?: StatSort;
   limit?: number;
   sessionsDir: string;
@@ -80,6 +89,14 @@ export type UsageStatsReport = {
   totals: UsageStatRow;
   unpricedModels: UsageUnpricedModelRow[];
   diagnostics?: UsageDiagnostics;
+};
+
+export type UsageRecordsReport = {
+  start: Date;
+  end: Date;
+  sessionsDir: string;
+  records: UsageRecord[];
+  diagnostics: UsageDiagnostics;
 };
 
 export type UsageSessionRow = {
@@ -100,12 +117,26 @@ export type UsageSessionRow = {
 export type UsageSessionEventRow = {
   timestamp: Date;
   model: string;
+  reasoningEffort?: string;
   cwd: string;
   usage: TokenUsage;
   credits: number;
   usd: number;
   priced: boolean;
   filePath: string;
+};
+
+export type UsageSessionCompactRow = {
+  start: Date;
+  end: Date;
+  events: number;
+  model: string;
+  reasoningEffort?: string;
+  usage: TokenUsage;
+  credits: number;
+  usd: number;
+  pricedCalls: number;
+  unpricedCalls: number;
 };
 
 export type UsageSessionsReport = {
@@ -128,6 +159,12 @@ export type UsageSessionDetailReport = {
   sessionsDir: string;
   summary?: UsageSessionRow;
   rows: UsageSessionEventRow[];
+  byModel: UsageStatRow[];
+  byCwd: UsageStatRow[];
+  byReasoningEffort: UsageStatRow[];
+  modelSwitches: number;
+  cwdSwitches: number;
+  reasoningEffortSwitches: number;
   totals: UsageStatRow;
   unpricedModels: UsageUnpricedModelRow[];
   diagnostics?: UsageDiagnostics;
@@ -138,14 +175,17 @@ export type UsageUnpricedModelRow = {
   pricingKey: string;
   calls: number;
   totalTokens: number;
+  note?: string;
   pricingStub: string;
 };
 
 export type UsageDiagnostics = {
+  scanAllFiles: boolean;
   scannedDirectories: number;
   skippedDirectories: number;
   readFiles: number;
   skippedFiles: number;
+  prefilteredFiles: number;
   readLines: number;
   invalidJsonLines: number;
   tokenCountEvents: number;
@@ -167,6 +207,10 @@ const EMPTY_USAGE: TokenUsage = {
   totalTokens: 0
 };
 const DEFAULT_FILE_READ_CONCURRENCY = 8;
+const FULL_SCAN_PREFILTER_CHUNK_SIZE = 64 * 1024;
+const DEFAULT_SESSION_DETAIL_COMPACT_ROWS = 20;
+const ALL_USAGE_RANGE_START = new Date(1900, 0, 1);
+const ALL_USAGE_RANGE_END = new Date(9999, 11, 31, 23, 59, 59, 999);
 
 type MutableStatRow = {
   key: string;
@@ -198,7 +242,8 @@ export function resolveStatOptions(raw: RawStatOptions = {}, now = new Date()): 
 
   return {
     ...rangeOptions,
-    groupBy
+    groupBy,
+    includeReasoningEffort: raw.reasoningEffort === true
   };
 }
 
@@ -225,17 +270,30 @@ export function resolveStatRangeOptions(
 }
 
 export async function readCodexUsageRecords(
-  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end">
+  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> & UsageFileScanOptions
 ) {
-  const records: UsageRecord[] = [];
-  await processCodexUsageRecords(options, (record) => records.push(record));
+  return (await readCodexUsageRecordsReport(options)).records;
+}
 
-  return records;
+export async function readCodexUsageRecordsReport(
+  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> & UsageFileScanOptions
+): Promise<UsageRecordsReport> {
+  const records: UsageRecord[] = [];
+  const diagnostics = await processCodexUsageRecords(options, (record) => records.push(record));
+
+  return {
+    start: options.start,
+    end: options.end,
+    sessionsDir: options.sessionsDir,
+    records,
+    diagnostics
+  };
 }
 
 export async function readCodexUsageStats(
   options: Pick<StatOptions, "start" | "end" | "groupBy" | "sessionsDir"> &
-    Partial<Pick<StatOptions, "sortBy" | "limit">>
+    Partial<Pick<StatOptions, "includeReasoningEffort" | "sortBy" | "limit">> &
+    UsageFileScanOptions
 ): Promise<UsageStatsReport> {
   const accumulator = createUsageStatsAccumulator(options);
   const diagnostics = await processCodexUsageRecords(options, (record) => accumulator.add(record));
@@ -245,7 +303,8 @@ export async function readCodexUsageStats(
 
 export async function readCodexUsageSessions(
   options: Pick<StatRangeOptions, "start" | "end" | "sessionsDir"> &
-    Partial<Pick<StatRangeOptions, "sortBy" | "limit">>,
+    Partial<Pick<StatRangeOptions, "sortBy" | "limit">> &
+    UsageFileScanOptions,
   limit = 10
 ): Promise<UsageSessionsReport> {
   const accumulator = createUsageSessionsAccumulator(options, limit);
@@ -256,7 +315,8 @@ export async function readCodexUsageSessions(
 
 export async function readCodexUsageSessionDetail(
   options: Pick<StatRangeOptions, "start" | "end" | "sessionsDir"> &
-    Partial<Pick<StatRangeOptions, "limit">>,
+    Partial<Pick<StatRangeOptions, "limit">> &
+    UsageFileScanOptions,
   sessionId: string
 ): Promise<UsageSessionDetailReport> {
   const accumulator = createUsageSessionDetailAccumulator(options, sessionId);
@@ -268,7 +328,7 @@ export async function readCodexUsageSessionDetail(
 export function buildUsageStats(
   records: Iterable<UsageRecord>,
   options: Pick<StatOptions, "start" | "end" | "groupBy" | "sessionsDir"> &
-    Partial<Pick<StatOptions, "sortBy" | "limit">>
+    Partial<Pick<StatOptions, "includeReasoningEffort" | "sortBy" | "limit">>
 ): UsageStatsReport {
   const accumulator = createUsageStatsAccumulator(options);
   for (const record of records) {
@@ -308,7 +368,7 @@ export function buildUsageSessionDetail(
 
 function createUsageStatsAccumulator(
   options: Pick<StatOptions, "start" | "end" | "groupBy" | "sessionsDir"> &
-    Partial<Pick<StatOptions, "sortBy" | "limit">>
+    Partial<Pick<StatOptions, "includeReasoningEffort" | "sortBy" | "limit">>
 ) {
   const rows = new Map<string, MutableStatRow>();
   const totalSessions = new Set<string>();
@@ -318,7 +378,7 @@ function createUsageStatsAccumulator(
 
   return {
     add(record: UsageRecord) {
-      const key = getGroupKey(record, options.groupBy);
+      const key = getGroupKey(record, options.groupBy, options.includeReasoningEffort === true);
       const row =
         rows.get(key) ??
         {
@@ -371,6 +431,7 @@ function createUsageStatsAccumulator(
         start: options.start,
         end: options.end,
         groupBy: options.groupBy,
+        includeReasoningEffort: options.includeReasoningEffort === true,
         sortBy,
         limit: options.limit,
         sessionsDir: options.sessionsDir,
@@ -537,6 +598,7 @@ function createUsageSessionDetailAccumulator(
       rows.push({
         timestamp: record.timestamp,
         model: record.model,
+        reasoningEffort: record.reasoningEffort,
         cwd: record.cwd,
         usage: record.usage,
         credits: roundCredits(cost.credits),
@@ -555,6 +617,11 @@ function createUsageSessionDetailAccumulator(
       );
       const outputRows =
         options.limit === undefined ? sortedRows : sortedRows.slice(0, options.limit);
+      const byModel = buildSessionEventBreakdown(sortedRows, (row) => row.model);
+      const byCwd = buildSessionEventBreakdown(sortedRows, (row) => row.cwd);
+      const byReasoningEffort = buildSessionEventBreakdown(sortedRows, (row) =>
+        row.reasoningEffort ?? "unknown"
+      );
 
       return {
         start: options.start,
@@ -571,6 +638,15 @@ function createUsageSessionDetailAccumulator(
                 usd: creditsToUsd(summary.credits)
               },
         rows: outputRows,
+        byModel,
+        byCwd,
+        byReasoningEffort,
+        modelSwitches: countValueSwitches(sortedRows, (row) => row.model),
+        cwdSwitches: countValueSwitches(sortedRows, (row) => row.cwd),
+        reasoningEffortSwitches: countValueSwitches(
+          sortedRows,
+          (row) => row.reasoningEffort ?? "unknown"
+        ),
         totals: {
           key: "Total",
           sessions: summary === undefined ? 0 : 1,
@@ -652,8 +728,185 @@ function byCreditsDesc(left: { credits: number }, right: { credits: number }) {
   return right.credits - left.credits;
 }
 
+function buildSessionEventBreakdown(
+  rows: UsageSessionEventRow[],
+  keyForRow: (row: UsageSessionEventRow) => string
+): UsageStatRow[] {
+  const grouped = new Map<string, UsageSessionEventRow[]>();
+
+  for (const row of rows) {
+    const key = keyForRow(row);
+    const groupRows = grouped.get(key) ?? [];
+    groupRows.push(row);
+    grouped.set(key, groupRows);
+  }
+
+  return [...grouped.entries()]
+    .map(([key, groupRows]) => {
+      const usage = { ...EMPTY_USAGE };
+      let credits = 0;
+      let pricedCalls = 0;
+      let unpricedCalls = 0;
+
+      for (const row of groupRows) {
+        addUsage(usage, row.usage);
+        credits += row.credits;
+
+        if (row.priced) {
+          pricedCalls += 1;
+        } else {
+          unpricedCalls += 1;
+        }
+      }
+
+      return {
+        key,
+        sessions: 1,
+        calls: groupRows.length,
+        usage,
+        credits: roundCredits(credits),
+        usd: creditsToUsd(credits),
+        pricedCalls,
+        unpricedCalls
+      };
+    })
+    .sort(
+      (left, right) =>
+        byCreditsDesc(left, right) || byTokensDesc(left, right) || left.key.localeCompare(right.key)
+    );
+}
+
+function countValueSwitches<T>(rows: T[], valueForRow: (row: T) => string) {
+  let switches = 0;
+  let previous: string | undefined;
+
+  for (const row of rows) {
+    const value = valueForRow(row);
+
+    if (previous !== undefined && value !== previous) {
+      switches += 1;
+    }
+
+    previous = value;
+  }
+
+  return switches;
+}
+
+function splitSessionRowsByModelAndEffort(rows: UsageSessionEventRow[]) {
+  const runs: UsageSessionEventRow[][] = [];
+
+  for (const row of rows) {
+    const previousRun = runs.at(-1);
+    const previous = previousRun?.at(-1);
+
+    if (
+      previous === undefined ||
+      previous.model !== row.model ||
+      (previous.reasoningEffort ?? "") !== (row.reasoningEffort ?? "")
+    ) {
+      runs.push([row]);
+      continue;
+    }
+
+    previousRun?.push(row);
+  }
+
+  return runs;
+}
+
+function allocateCompactBuckets(runs: UsageSessionEventRow[][], maxRows: number) {
+  const totalEvents = runs.reduce((sum, run) => sum + run.length, 0);
+  const buckets = runs.map(() => 1);
+  let remaining = Math.max(0, maxRows - runs.length);
+
+  while (remaining > 0) {
+    let bestIndex = -1;
+    let bestDeficit = Number.NEGATIVE_INFINITY;
+
+    for (let index = 0; index < runs.length; index += 1) {
+      const run = runs[index];
+      const bucket = buckets[index];
+
+      if (run === undefined || bucket === undefined || bucket >= run.length) {
+        continue;
+      }
+
+      const desired = (run.length / totalEvents) * maxRows;
+      const deficit = desired - bucket;
+
+      if (deficit > bestDeficit) {
+        bestDeficit = deficit;
+        bestIndex = index;
+      }
+    }
+
+    if (bestIndex === -1) {
+      break;
+    }
+
+    buckets[bestIndex] = (buckets[bestIndex] ?? 1) + 1;
+    remaining -= 1;
+  }
+
+  return buckets;
+}
+
+function splitSessionRun(rows: UsageSessionEventRow[], bucketCount: number) {
+  const buckets: UsageSessionCompactRow[] = [];
+  const safeBucketCount = Math.max(1, Math.min(rows.length, Math.floor(bucketCount)));
+
+  for (let bucketIndex = 0; bucketIndex < safeBucketCount; bucketIndex += 1) {
+    const start = Math.floor((bucketIndex * rows.length) / safeBucketCount);
+    const end = Math.floor(((bucketIndex + 1) * rows.length) / safeBucketCount);
+    const chunk = rows.slice(start, Math.max(start + 1, end));
+    buckets.push(aggregateSessionCompactRows(chunk));
+  }
+
+  return buckets;
+}
+
+function aggregateSessionCompactRows(rows: UsageSessionEventRow[]): UsageSessionCompactRow {
+  const first = rows[0];
+  const last = rows.at(-1);
+
+  if (first === undefined || last === undefined) {
+    throw new Error("Cannot aggregate an empty session detail row group.");
+  }
+
+  const usage = { ...EMPTY_USAGE };
+  let credits = 0;
+  let pricedCalls = 0;
+  let unpricedCalls = 0;
+
+  for (const row of rows) {
+    addUsage(usage, row.usage);
+    credits += row.credits;
+
+    if (row.priced) {
+      pricedCalls += 1;
+    } else {
+      unpricedCalls += 1;
+    }
+  }
+
+  return {
+    start: first.timestamp,
+    end: last.timestamp,
+    events: rows.length,
+    model: first.model,
+    reasoningEffort: first.reasoningEffort,
+    usage,
+    credits: roundCredits(credits),
+    usd: creditsToUsd(credits),
+    pricedCalls,
+    unpricedCalls
+  };
+}
+
 function addUnpricedModel(unpricedModels: Map<string, UsageUnpricedModelRow>, record: UsageRecord) {
   const pricingKey = normalizeModelName(record.model);
+  const cost = calculateCreditCost(record.model, record.usage);
   const row =
     unpricedModels.get(pricingKey) ??
     {
@@ -661,6 +914,7 @@ function addUnpricedModel(unpricedModels: Map<string, UsageUnpricedModelRow>, re
       pricingKey,
       calls: 0,
       totalTokens: 0,
+      note: cost.unpricedReason,
       pricingStub: formatPricingStub(record.model)
     };
 
@@ -719,8 +973,8 @@ export function formatUsageStats(
 
   const lines = [
     pc.bold("Codex usage"),
-    `Range: ${formatDateTime(report.start)} to ${formatDateTime(report.end)}`,
-    `Grouped by: ${report.groupBy}`,
+    `Range: ${formatReportRange(report)}`,
+    `Grouped by: ${formatGroupBy(report)}`,
     `Sessions dir: ${report.sessionsDir}`,
     ""
   ];
@@ -758,7 +1012,7 @@ export function formatUsageSessions(
 
   const lines = [
     pc.bold("Codex usage sessions"),
-    `Range: ${formatDateTime(report.start)} to ${formatDateTime(report.end)}`,
+    `Range: ${formatReportRange(report)}`,
     `Sessions dir: ${report.sessionsDir}`,
     ""
   ];
@@ -778,13 +1032,20 @@ export function formatUsageSessions(
 export function formatUsageSessionDetail(
   report: UsageSessionDetailReport,
   format: StatFormat = "table",
-  options: { verbose?: boolean } = {}
+  options: { verbose?: boolean; detail?: boolean } = {}
 ): string {
   if (format === "json") {
     return `${JSON.stringify(toUsageSessionDetailJson(report), null, 2)}\n`;
   }
 
-  const rows = [sessionDetailHeaders(), ...report.rows.map((row) => sessionDetailRow(row))];
+  const compactRows = buildUsageSessionCompactRows(
+    report.rows,
+    DEFAULT_SESSION_DETAIL_COMPACT_ROWS
+  );
+  const rows =
+    options.detail === true
+      ? [sessionDetailHeaders(), ...report.rows.map((row) => sessionDetailRow(row))]
+      : [sessionCompactHeaders(), ...compactRows.map((row) => sessionCompactRow(row))];
 
   if (format === "csv") {
     return `${formatCsv(rows)}\n`;
@@ -797,7 +1058,7 @@ export function formatUsageSessionDetail(
   const lines = [
     pc.bold("Codex usage session detail"),
     `Session: ${report.sessionId}`,
-    `Range: ${formatDateTime(report.start)} to ${formatDateTime(report.end)}`,
+    `Range: ${formatReportRange(report)}`,
     `Sessions dir: ${report.sessionsDir}`,
     ""
   ];
@@ -808,6 +1069,9 @@ export function formatUsageSessionDetail(
       `CWD: ${report.summary.cwd}`,
       `First seen: ${formatDateTime(report.summary.firstSeen)}`,
       `Last seen: ${formatDateTime(report.summary.lastSeen)}`,
+      `Changes: model ${formatInteger(report.modelSwitches)}, cwd ${formatInteger(
+        report.cwdSwitches
+      )}, reasoning effort ${formatInteger(report.reasoningEffortSwitches)}`,
       ""
     );
   }
@@ -818,10 +1082,62 @@ export function formatUsageSessionDetail(
     return lines.join("\n");
   }
 
-  lines.push(formatTable([...rows, sessionDetailTotalRow(report.totals)], report.rows.length));
+  if (options.detail === true) {
+    lines.push(formatTable([...rows, sessionDetailTotalRow(report.totals)], report.rows.length));
+  } else {
+    lines.push(formatTable([...rows, sessionCompactTotalRow(report.totals)], compactRows.length));
+
+    if (report.rows.length > DEFAULT_SESSION_DETAIL_COMPACT_ROWS) {
+      lines.push(
+        "",
+        `Compact view: ${formatInteger(compactRows.length)} row(s) from ${formatInteger(
+          report.rows.length
+        )} event(s). Use --detail for full event-level rows.`
+      );
+    }
+  }
+
+  appendSessionDetailBreakdown(lines, "By model:", report.byModel);
+  appendSessionDetailBreakdown(lines, "By cwd:", report.byCwd);
+  appendSessionDetailBreakdown(lines, "By reasoning effort:", report.byReasoningEffort);
   appendUsageNotes(lines, report, options);
 
   return lines.join("\n");
+}
+
+export function buildUsageSessionCompactRows(
+  rows: UsageSessionEventRow[],
+  maxRows = DEFAULT_SESSION_DETAIL_COMPACT_ROWS
+): UsageSessionCompactRow[] {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const safeMaxRows = Math.max(1, Math.floor(maxRows));
+  const runs = splitSessionRowsByModelAndEffort(rows);
+
+  if (rows.length <= safeMaxRows) {
+    return rows.map((row) => aggregateSessionCompactRows([row]));
+  }
+
+  if (runs.length >= safeMaxRows) {
+    return runs.map((run) => aggregateSessionCompactRows(run));
+  }
+
+  const bucketCounts = allocateCompactBuckets(runs, safeMaxRows);
+  return runs.flatMap((run, index) => splitSessionRun(run, bucketCounts[index] ?? 1));
+}
+
+function appendSessionDetailBreakdown(lines: string[], label: string, rows: UsageStatRow[]) {
+  if (rows.length === 0) {
+    return;
+  }
+
+  lines.push(
+    "",
+    label,
+    formatTable([usageHeaders(), ...rows.map((row) => usageRow(row))], rows.length)
+  );
 }
 
 function appendUsageNotes(
@@ -861,10 +1177,12 @@ function appendUsageNotes(
     lines.push(
       "",
       "Diagnostics:",
+      `  Full file scan: ${diagnostics.scanAllFiles ? "yes" : "no"}`,
       `  Directories scanned: ${formatInteger(diagnostics.scannedDirectories)}`,
       `  Directories skipped by date: ${formatInteger(diagnostics.skippedDirectories)}`,
       `  Files read: ${formatInteger(diagnostics.readFiles)}`,
       `  Files skipped by date: ${formatInteger(diagnostics.skippedFiles)}`,
+      `  Files skipped by full-scan prefilter: ${formatInteger(diagnostics.prefilteredFiles)}`,
       `  File read concurrency: ${formatInteger(diagnostics.fileReadConcurrency)}`,
       `  Lines read: ${formatInteger(diagnostics.readLines)}`,
       `  Invalid JSON lines: ${formatInteger(diagnostics.invalidJsonLines)}`,
@@ -876,7 +1194,28 @@ function appendUsageNotes(
         diagnostics.skippedEvents.emptyUsage
       )}, out of range ${formatInteger(diagnostics.skippedEvents.outOfRange)}`
     );
+  } else if (shouldSuggestFullScan(report.diagnostics)) {
+    const diagnostics = report.diagnostics;
+
+    if (diagnostics === undefined) {
+      return;
+    }
+
+    lines.push(
+      "",
+      `Note: ${formatInteger(
+        diagnostics.skippedFiles
+      )} session file(s) were skipped by rollout date. Use --full-scan if you expect long sessions with in-range events inside older files.`
+    );
   }
+}
+
+function shouldSuggestFullScan(diagnostics: UsageDiagnostics | undefined) {
+  return (
+    diagnostics !== undefined &&
+    diagnostics.scanAllFiles === false &&
+    diagnostics.skippedFiles > 0
+  );
 }
 
 export function toUsageStatsJson(report: UsageStatsReport) {
@@ -884,6 +1223,7 @@ export function toUsageStatsJson(report: UsageStatsReport) {
     start: report.start.toISOString(),
     end: report.end.toISOString(),
     groupBy: report.groupBy,
+    includeReasoningEffort: report.includeReasoningEffort,
     sortBy: report.sortBy,
     limit: report.limit,
     sessionsDir: report.sessionsDir,
@@ -931,6 +1271,12 @@ export function toUsageSessionDetailJson(report: UsageSessionDetailReport) {
       ...row,
       timestamp: row.timestamp.toISOString()
     })),
+    byModel: report.byModel,
+    byCwd: report.byCwd,
+    byReasoningEffort: report.byReasoningEffort,
+    modelSwitches: report.modelSwitches,
+    cwdSwitches: report.cwdSwitches,
+    reasoningEffortSwitches: report.reasoningEffortSwitches,
     totals: report.totals,
     unpricedModels: report.unpricedModels,
     diagnostics: report.diagnostics
@@ -938,11 +1284,16 @@ export function toUsageSessionDetailJson(report: UsageSessionDetailReport) {
 }
 
 async function processCodexUsageRecords(
-  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end">,
+  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> & UsageFileScanOptions,
   onRecord: (record: UsageRecord) => void
 ) {
-  const diagnostics = createUsageDiagnostics();
-  const files = await listJsonlFiles(options.sessionsDir, options, [], diagnostics);
+  const diagnostics = createUsageDiagnostics(DEFAULT_FILE_READ_CONCURRENCY, options.scanAllFiles === true);
+  let files = await listJsonlFiles(options.sessionsDir, options, [], diagnostics);
+
+  if (options.scanAllFiles === true) {
+    files = await prefilterFullScanFiles(files, options.start, diagnostics);
+  }
+
   diagnostics.readFiles = files.length;
 
   for (let index = 0; index < files.length; index += DEFAULT_FILE_READ_CONCURRENCY) {
@@ -969,6 +1320,7 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   let sessionId = sessionIdFromPath(filePath);
   let model = "unknown";
+  let reasoningEffort: string | undefined;
   let cwd = "unknown";
   let previousTotal: TokenUsage | undefined;
 
@@ -994,6 +1346,7 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
       const payload = asRecord(event.payload);
       sessionId = readString(payload?.id) ?? sessionId;
       model = readString(payload?.model) ?? model;
+      reasoningEffort = readReasoningEffort(payload) ?? reasoningEffort;
       cwd = readString(payload?.cwd) ?? cwd;
       continue;
     }
@@ -1001,6 +1354,7 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
     if (event.type === "turn_context") {
       const payload = asRecord(event.payload);
       model = readString(payload?.model) ?? model;
+      reasoningEffort = readReasoningEffort(payload) ?? reasoningEffort;
       cwd = readString(payload?.cwd) ?? cwd;
       continue;
     }
@@ -1047,6 +1401,7 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
       timestamp,
       sessionId,
       model,
+      reasoningEffort,
       cwd,
       filePath,
       usage
@@ -1058,7 +1413,7 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
 
 async function listJsonlFiles(
   root: string,
-  range: Pick<StatRangeOptions, "start" | "end">,
+  range: Pick<StatRangeOptions, "start" | "end"> & UsageFileScanOptions,
   dateParts: string[] | undefined = [],
   diagnostics = createUsageDiagnostics()
 ): Promise<string[]> {
@@ -1076,7 +1431,8 @@ async function listJsonlFiles(
   }
 
   const files: string[] = [];
-  const scanWindow = createDirectoryScanWindow(range);
+  const scanAllFiles = range.scanAllFiles === true;
+  const scanWindow = scanAllFiles ? undefined : createDirectoryScanWindow(range);
 
   for (const entry of entries) {
     const path = join(root, entry.name);
@@ -1084,14 +1440,18 @@ async function listJsonlFiles(
     if (entry.isDirectory()) {
       const nextDateParts = appendDatePathPart(dateParts, entry.name);
 
-      if (nextDateParts !== undefined && isDatePathOutsideWindow(nextDateParts, scanWindow)) {
+      if (
+        scanWindow !== undefined &&
+        nextDateParts !== undefined &&
+        isDatePathOutsideWindow(nextDateParts, scanWindow)
+      ) {
         diagnostics.skippedDirectories += 1;
         continue;
       }
 
       files.push(...(await listJsonlFiles(path, range, nextDateParts, diagnostics)));
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      if (isRolloutFileOutsideWindow(entry.name, scanWindow)) {
+      if (scanWindow !== undefined && isRolloutFileOutsideWindow(entry.name, scanWindow)) {
         diagnostics.skippedFiles += 1;
         continue;
       }
@@ -1103,12 +1463,101 @@ async function listJsonlFiles(
   return files.sort();
 }
 
-function createUsageDiagnostics(fileReadConcurrency = DEFAULT_FILE_READ_CONCURRENCY): UsageDiagnostics {
+async function prefilterFullScanFiles(
+  files: string[],
+  start: Date,
+  diagnostics: UsageDiagnostics
+) {
+  const keptFiles: string[] = [];
+
+  for (let index = 0; index < files.length; index += DEFAULT_FILE_READ_CONCURRENCY) {
+    const batch = files.slice(index, index + DEFAULT_FILE_READ_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (filePath) => {
+        const lastUsageAt = await readLastTokenCountTimestamp(filePath);
+
+        if (lastUsageAt !== undefined && lastUsageAt < start) {
+          diagnostics.prefilteredFiles += 1;
+          return undefined;
+        }
+
+        return filePath;
+      })
+    );
+
+    for (const filePath of results) {
+      if (filePath !== undefined) {
+        keptFiles.push(filePath);
+      }
+    }
+  }
+
+  return keptFiles;
+}
+
+async function readLastTokenCountTimestamp(filePath: string) {
+  const handle = await open(filePath, "r");
+
+  try {
+    const { size } = await handle.stat();
+    let position = size;
+    let carry = "";
+
+    while (position > 0) {
+      const readSize = Math.min(FULL_SCAN_PREFILTER_CHUNK_SIZE, position);
+      position -= readSize;
+
+      const buffer = Buffer.allocUnsafe(readSize);
+      await handle.read(buffer, 0, readSize, position);
+
+      const text = `${buffer.toString("utf8")}${carry}`;
+      const includesFileStart = position === 0;
+      const lines = text.split(/\r?\n/);
+      const firstCompleteLineIndex = includesFileStart ? 0 : 1;
+
+      for (let lineIndex = lines.length - 1; lineIndex >= firstCompleteLineIndex; lineIndex -= 1) {
+        const timestamp = readTokenCountTimestampFromLine(lines[lineIndex] ?? "");
+
+        if (timestamp !== undefined) {
+          return timestamp;
+        }
+      }
+
+      carry = includesFileStart ? "" : lines[0] ?? "";
+    }
+
+    return readTokenCountTimestampFromLine(carry);
+  } finally {
+    await handle.close();
+  }
+}
+
+function readTokenCountTimestampFromLine(line: string) {
+  if (!line.includes('"token_count"')) {
+    return undefined;
+  }
+
+  const event = parseJsonObject(line);
+  const payload = asRecord(event?.payload);
+
+  if (event?.type !== "event_msg" || payload?.type !== "token_count") {
+    return undefined;
+  }
+
+  return readDate(event.timestamp);
+}
+
+function createUsageDiagnostics(
+  fileReadConcurrency = DEFAULT_FILE_READ_CONCURRENCY,
+  scanAllFiles = false
+): UsageDiagnostics {
   return {
+    scanAllFiles,
     scannedDirectories: 0,
     skippedDirectories: 0,
     readFiles: 0,
     skippedFiles: 0,
+    prefilteredFiles: 0,
     readLines: 0,
     invalidJsonLines: 0,
     tokenCountEvents: 0,
@@ -1124,6 +1573,7 @@ function createUsageDiagnostics(fileReadConcurrency = DEFAULT_FILE_READ_CONCURRE
 }
 
 function mergeUsageDiagnostics(target: UsageDiagnostics, source: UsageDiagnostics) {
+  target.prefilteredFiles += source.prefilteredFiles;
   target.readLines += source.readLines;
   target.invalidJsonLines += source.invalidJsonLines;
   target.tokenCountEvents += source.tokenCountEvents;
@@ -1309,6 +1759,10 @@ function resolveGroupBy(
     return parseGroupBy(value);
   }
 
+  if (raw.all === true) {
+    return "month";
+  }
+
   if (raw.month === true) {
     return "day";
   }
@@ -1368,14 +1822,23 @@ function parseDateBound(value: string, bound: "start" | "end") {
 }
 
 function resolveDateRange(raw: RawStatOptions, now: Date) {
-  const quickRanges = [raw.today, raw.yesterday, raw.month, raw.last !== undefined].filter(Boolean);
+  const quickRanges = [raw.all, raw.today, raw.yesterday, raw.month, raw.last !== undefined].filter(
+    Boolean
+  );
 
   if (quickRanges.length > 1) {
-    throw new Error("Use only one quick range option: --today, --yesterday, --month, or --last.");
+    throw new Error("Use only one quick range option: --all, --today, --yesterday, --month, or --last.");
   }
 
   if (quickRanges.length === 1 && (raw.start !== undefined || raw.end !== undefined)) {
     throw new Error("Quick range options cannot be combined with --start or --end.");
+  }
+
+  if (raw.all === true) {
+    return {
+      start: new Date(ALL_USAGE_RANGE_START),
+      end: new Date(ALL_USAGE_RANGE_END)
+    };
   }
 
   if (raw.today === true) {
@@ -1481,9 +1944,13 @@ function defaultCodexHome() {
   return process.env.CODEX_HOME ?? join(homedir(), ".codex");
 }
 
-function getGroupKey(record: UsageRecord, groupBy: StatGroupBy) {
+function getGroupKey(
+  record: UsageRecord,
+  groupBy: StatGroupBy,
+  includeReasoningEffort: boolean
+) {
   if (groupBy === "model") {
-    return record.model;
+    return includeReasoningEffort ? modelGroupKey(record) : record.model;
   }
 
   if (groupBy === "cwd") {
@@ -1503,6 +1970,25 @@ function getGroupKey(record: UsageRecord, groupBy: StatGroupBy) {
   }
 
   return localDateKey(record.timestamp);
+}
+
+function modelGroupKey(record: Pick<UsageRecord, "model" | "reasoningEffort">) {
+  const effort = normalizeReasoningEffort(record.reasoningEffort);
+
+  if (record.model === "unknown" || effort === undefined) {
+    return record.model;
+  }
+
+  return `${record.model}-${effort}`;
+}
+
+function normalizeReasoningEffort(value: string | undefined) {
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized === "" ? undefined : normalized;
 }
 
 function localHourKey(date: Date) {
@@ -1535,6 +2021,31 @@ function formatDateTime(date: Date) {
   return `${localDateKey(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(
     date.getSeconds()
   )}`;
+}
+
+function formatReportRange(
+  report: Pick<UsageStatsReport | UsageSessionsReport | UsageSessionDetailReport, "start" | "end">
+) {
+  if (isAllUsageRange(report)) {
+    return "all";
+  }
+
+  return `${formatDateTime(report.start)} to ${formatDateTime(report.end)}`;
+}
+
+function formatGroupBy(report: Pick<UsageStatsReport, "groupBy" | "includeReasoningEffort">) {
+  if (report.groupBy === "model" && report.includeReasoningEffort) {
+    return "model + reasoning_effort";
+  }
+
+  return report.groupBy;
+}
+
+function isAllUsageRange(range: Pick<StatRangeOptions, "start" | "end">) {
+  return (
+    range.start.getTime() === ALL_USAGE_RANGE_START.getTime() &&
+    range.end.getTime() === ALL_USAGE_RANGE_END.getTime()
+  );
 }
 
 function usageHeaders() {
@@ -1605,7 +2116,24 @@ function sessionDetailHeaders() {
   return [
     "Time",
     "Model",
+    "Effort",
     "CWD",
+    "Input",
+    "Cached",
+    "Output",
+    "Reasoning",
+    "Total",
+    "Credits",
+    "USD"
+  ];
+}
+
+function sessionCompactHeaders() {
+  return [
+    "Range",
+    "Events",
+    "Model",
+    "Effort",
     "Input",
     "Cached",
     "Output",
@@ -1620,6 +2148,7 @@ function sessionDetailRow(row: UsageSessionEventRow) {
   return [
     formatDateTime(row.timestamp),
     row.model,
+    row.reasoningEffort ?? "",
     row.cwd,
     formatInteger(row.usage.inputTokens),
     formatInteger(row.usage.cachedInputTokens),
@@ -1631,9 +2160,26 @@ function sessionDetailRow(row: UsageSessionEventRow) {
   ];
 }
 
+function sessionCompactRow(row: UsageSessionCompactRow) {
+  return [
+    formatCompactRange(row),
+    formatInteger(row.events),
+    row.model,
+    row.reasoningEffort ?? "",
+    formatInteger(row.usage.inputTokens),
+    formatInteger(row.usage.cachedInputTokens),
+    formatInteger(row.usage.outputTokens),
+    formatInteger(row.usage.reasoningOutputTokens),
+    formatInteger(row.usage.totalTokens),
+    row.unpricedCalls === 0 ? formatCredits(row.credits) : "partial",
+    row.unpricedCalls === 0 ? formatUsd(row.usd) : "partial"
+  ];
+}
+
 function sessionDetailTotalRow(row: UsageStatRow) {
   return [
     "Total",
+    "",
     "",
     "",
     formatInteger(row.usage.inputTokens),
@@ -1644,6 +2190,29 @@ function sessionDetailTotalRow(row: UsageStatRow) {
     formatCredits(row.credits),
     formatUsd(row.usd)
   ];
+}
+
+function sessionCompactTotalRow(row: UsageStatRow) {
+  return [
+    "Total",
+    formatInteger(row.calls),
+    "",
+    "",
+    formatInteger(row.usage.inputTokens),
+    formatInteger(row.usage.cachedInputTokens),
+    formatInteger(row.usage.outputTokens),
+    formatInteger(row.usage.reasoningOutputTokens),
+    formatInteger(row.usage.totalTokens),
+    formatCredits(row.credits),
+    formatUsd(row.usd)
+  ];
+}
+
+function formatCompactRange(row: Pick<UsageSessionCompactRow, "start" | "end">) {
+  const start = formatDateTime(row.start);
+  const end = formatDateTime(row.end);
+
+  return start === end ? start : `${start} -> ${end}`;
 }
 
 function formatTable(rows: string[][], dataRowCount: number) {
@@ -1795,6 +2364,31 @@ function parseJsonObject(line: string) {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function readReasoningEffort(payload: Record<string, unknown> | undefined) {
+  if (payload === undefined) {
+    return undefined;
+  }
+
+  const modelConfig = asRecord(payload.model_config ?? payload.modelConfig);
+  const reasoning = asRecord(payload.reasoning);
+  const collaborationMode = asRecord(payload.collaboration_mode ?? payload.collaborationMode);
+  const collaborationSettings = asRecord(collaborationMode?.settings);
+
+  return (
+    readString(
+      payload.reasoning_effort ??
+        payload.reasoningEffort ??
+        payload.model_reasoning_effort ??
+        payload.modelReasoningEffort
+    ) ??
+    readString(modelConfig?.reasoning_effort ?? modelConfig?.reasoningEffort) ??
+    readString(reasoning?.effort ?? reasoning?.reasoning_effort ?? reasoning?.reasoningEffort) ??
+    readString(
+      collaborationSettings?.reasoning_effort ?? collaborationSettings?.reasoningEffort
+    )
+  );
 }
 
 function readDate(value: unknown) {

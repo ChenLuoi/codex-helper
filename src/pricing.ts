@@ -8,14 +8,27 @@ export type ModelPricing = {
   note?: string;
 };
 
+export type KnownUnpricedModel = {
+  label: string;
+  note: string;
+};
+
 export type CreditCost = {
   priced: boolean;
   pricingLabel: string;
+  unpricedReason?: string;
   billableInputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
   credits: number;
 };
+
+export const CODEX_RATE_CARD_SOURCE = {
+  name: "OpenAI Help Center Codex rate card",
+  url: "https://help.openai.com/en/articles/20001106-codex-rate-card",
+  checkedAt: "2026-05-13",
+  creditToUsd: "25 credits = $1"
+} as const;
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gpt-5.5": {
@@ -48,6 +61,13 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
     cachedInputCreditsPerMillion: 4.375,
     outputCreditsPerMillion: 350
   },
+  "gpt-5.3-codex-spark": {
+    label: "GPT-5.3-Codex-Spark",
+    inputCreditsPerMillion: 0,
+    cachedInputCreditsPerMillion: 0,
+    outputCreditsPerMillion: 0,
+    note: "research preview; charged at 0 credits"
+  },
   "gpt-image-2 (image)": {
     label: "GPT-Image-2 (image)",
     inputCreditsPerMillion: 200,
@@ -62,6 +82,8 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   }
 };
 
+export const KNOWN_UNPRICED_MODELS: Record<string, KnownUnpricedModel> = {};
+
 const MODEL_ALIASES: Record<string, string> = {
   "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
   "gpt-5.4 mini": "gpt-5.4-mini",
@@ -69,26 +91,51 @@ const MODEL_ALIASES: Record<string, string> = {
   "gpt-image-2:image": "gpt-image-2 (image)",
   "gpt-image-2-image": "gpt-image-2 (image)",
   "gpt-image-2 image": "gpt-image-2 (image)",
+  "gpt-image-2.0:image": "gpt-image-2 (image)",
+  "gpt-image-2.0-image": "gpt-image-2 (image)",
+  "gpt-image-2.0 image": "gpt-image-2 (image)",
+  "gpt-image-2.0 (image)": "gpt-image-2 (image)",
   "gpt-image-2:text": "gpt-image-2 (text)",
   "gpt-image-2-text": "gpt-image-2 (text)",
-  "gpt-image-2 text": "gpt-image-2 (text)"
+  "gpt-image-2 text": "gpt-image-2 (text)",
+  "gpt-image-2.0:text": "gpt-image-2 (text)",
+  "gpt-image-2.0-text": "gpt-image-2 (text)",
+  "gpt-image-2.0 text": "gpt-image-2 (text)",
+  "gpt-image-2.0 (text)": "gpt-image-2 (text)"
 };
 
 export function getModelPricing(model: string): ModelPricing | undefined {
-  const normalized = normalizeModelName(model);
-  const key = MODEL_ALIASES[normalized] ?? normalized;
+  const key = pricingKeyForModel(model);
   return MODEL_PRICING[key];
+}
+
+export function getKnownUnpricedModel(model: string): KnownUnpricedModel | undefined {
+  return KNOWN_UNPRICED_MODELS[pricingKeyForModel(model)];
+}
+
+export function listModelPricing() {
+  return Object.entries(MODEL_PRICING)
+    .map(([key, pricing]) => ({ key, ...pricing }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+}
+
+export function listKnownUnpricedModels() {
+  return Object.entries(KNOWN_UNPRICED_MODELS)
+    .map(([key, model]) => ({ key, ...model }))
+    .sort((left, right) => left.key.localeCompare(right.key));
 }
 
 export function calculateCreditCost(model: string, usage: TokenUsage): CreditCost {
   const pricing = getModelPricing(model);
+  const unpriced = getKnownUnpricedModel(model);
   const cachedInputTokens = Math.max(0, Math.min(usage.cachedInputTokens, usage.inputTokens));
   const billableInputTokens = Math.max(0, usage.inputTokens - cachedInputTokens);
 
   if (pricing === undefined) {
     return {
       priced: false,
-      pricingLabel: model,
+      pricingLabel: unpriced?.label ?? model,
+      unpricedReason: unpriced?.note,
       billableInputTokens,
       cachedInputTokens,
       outputTokens: usage.outputTokens,
@@ -112,4 +159,9 @@ export function calculateCreditCost(model: string, usage: TokenUsage): CreditCos
 
 export function normalizeModelName(model: string) {
   return model.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function pricingKeyForModel(model: string) {
+  const normalized = normalizeModelName(model);
+  return MODEL_ALIASES[normalized] ?? normalized;
 }

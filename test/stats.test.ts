@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildUsageSessionCompactRows,
   buildUsageSessionDetail,
   buildUsageSessions,
   buildUsageStats,
@@ -48,14 +49,25 @@ describe("stats", () => {
 
     const today = resolveStatOptions({ today: true, sessionsDir: "/tmp/sessions" }, now);
     const month = resolveStatOptions({ month: true, sessionsDir: "/tmp/sessions" }, now);
+    const all = resolveStatOptions({ all: true, sessionsDir: "/tmp/sessions" }, now);
     const lastTwoDays = resolveStatOptions({ last: "2d", sessionsDir: "/tmp/sessions" }, now);
 
     expect(today.start).toEqual(new Date("2026-05-11T16:00:00.000Z"));
     expect(today.groupBy).toBe("hour");
     expect(month.start).toEqual(new Date("2026-04-30T16:00:00.000Z"));
     expect(month.groupBy).toBe("day");
+    expect(all.start.getFullYear()).toBe(1900);
+    expect(all.end.getFullYear()).toBe(9999);
+    expect(all.groupBy).toBe("month");
+    expect(all.includeReasoningEffort).toBe(false);
     expect(lastTwoDays.start).toEqual(new Date("2026-05-10T12:34:56.000Z"));
     expect(lastTwoDays.groupBy).toBe("hour");
+    expect(
+      resolveStatOptions(
+        { reasoningEffort: true, groupBy: "model", sessionsDir: "/tmp/sessions" },
+        now
+      ).includeReasoningEffort
+    ).toBe(true);
     expect(resolveStatOptions({ format: "csv", sessionsDir: "/tmp/sessions" }, now).format).toBe(
       "csv"
     );
@@ -65,6 +77,9 @@ describe("stats", () => {
     expect(() =>
       resolveStatOptions({ today: true, last: "7d", sessionsDir: "/tmp/sessions" }, now)
     ).toThrow("Use only one quick range");
+    expect(() =>
+      resolveStatOptions({ all: true, start: "2026-05-01", sessionsDir: "/tmp/sessions" }, now)
+    ).toThrow("Quick range options cannot be combined");
   });
 
   it("infers default group-by from the time range", () => {
@@ -114,6 +129,7 @@ describe("stats", () => {
 
     expect(records).toHaveLength(3);
     expect(records.map((record) => record.model)).toEqual(["gpt-5.5", "gpt-5.5", "gpt-5.4"]);
+    expect(records.map((record) => record.reasoningEffort)).toEqual(["high", "xhigh", undefined]);
     expect(records.map((record) => record.cwd)).toEqual([
       "/repo/alpha",
       "/repo/alpha",
@@ -222,6 +238,23 @@ describe("stats", () => {
     expect(formatUsageStats(byModel, "csv")).toContain("Group,Sessions,Calls");
     expect(formatUsageStats(byModel, "markdown")).toContain("| Group | Sessions | Calls |");
     expect(toUsageStatsJson(byModel).rows[0]?.usd).toBeGreaterThan(0);
+    expect(toUsageStatsJson(byModel).includeReasoningEffort).toBe(false);
+
+    const byModelAndReasoningEffort = buildUsageStats(records, {
+      start,
+      end,
+      groupBy: "model",
+      includeReasoningEffort: true,
+      sessionsDir
+    });
+
+    expect(byModelAndReasoningEffort.rows.map((row) => row.key)).toEqual([
+      "gpt-5.5-xhigh",
+      "gpt-5.5-high",
+      "gpt-5.4"
+    ]);
+    expect(formatUsageStats(byModelAndReasoningEffort)).toContain("Grouped by: model + reasoning_effort");
+    expect(toUsageStatsJson(byModelAndReasoningEffort).includeReasoningEffort).toBe(true);
 
     const byCwd = buildUsageStats(records, {
       start,
@@ -231,6 +264,113 @@ describe("stats", () => {
     });
 
     expect(byCwd.rows.map((row) => row.key)).toEqual(["/repo/alpha", "/repo/beta"]);
+  });
+
+  it("reads all usage records when --all disables date pruning", async () => {
+    const sessionsDir = await createFixtureSessions();
+    const options = resolveStatOptions(
+      { all: true, groupBy: "month", sessionsDir },
+      new Date("2026-05-12T12:34:56.000Z")
+    );
+
+    const records = await readCodexUsageRecords(options);
+    const report = await readCodexUsageStats(options);
+
+    expect(records).toHaveLength(6);
+    expect(report.rows.map((row) => row.key)).toEqual(["2026-05"]);
+    expect(report.totals.calls).toBe(6);
+    expect(report.diagnostics).toMatchObject({
+      skippedDirectories: 0,
+      skippedFiles: 0,
+      skippedEvents: {
+        outOfRange: 0
+      }
+    });
+    expect(formatUsageStats(report)).toContain("Range: all");
+    expect(toUsageStatsJson(report).start).toBe(options.start.toISOString());
+  });
+
+  it("can scan all JSONL files for long sessions while preserving event range filtering", async () => {
+    const sessionsDir = await createLongSessionFixture();
+    const start = new Date("2026-05-10T00:00:00.000Z");
+    const end = new Date("2026-05-11T23:59:59.999Z");
+
+    const defaultRecords = await readCodexUsageRecords({ sessionsDir, start, end });
+    const defaultReport = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir
+    });
+
+    expect(defaultRecords).toHaveLength(0);
+    expect(defaultReport.diagnostics).toMatchObject({
+      scanAllFiles: false,
+      readFiles: 0,
+      skippedFiles: 1,
+      includedUsageEvents: 0
+    });
+    expect(formatUsageStats(defaultReport)).toContain("Use --full-scan");
+
+    const preciseRecords = await readCodexUsageRecords({
+      sessionsDir,
+      start,
+      end,
+      scanAllFiles: true
+    });
+    const preciseReport = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir,
+      scanAllFiles: true
+    });
+
+    expect(preciseRecords).toHaveLength(1);
+    expect(preciseRecords[0]).toMatchObject({
+      sessionId: "long-session",
+      model: "gpt-5.5",
+      cwd: "/repo/long",
+      usage: { inputTokens: 100, cachedInputTokens: 10, outputTokens: 20, totalTokens: 120 }
+    });
+    expect(preciseReport.rows.map((row) => row.key)).toEqual(["2026-05-10"]);
+    expect(preciseReport.totals.calls).toBe(1);
+    expect(preciseReport.diagnostics).toMatchObject({
+      scanAllFiles: true,
+      readFiles: 1,
+      skippedFiles: 0,
+      includedUsageEvents: 1,
+      skippedEvents: {
+        outOfRange: 1
+      }
+    });
+    expect(formatUsageStats(preciseReport)).not.toContain("Use --full-scan");
+  });
+
+  it("prefilters full-scan files whose last usage is before the requested range", async () => {
+    const sessionsDir = await createFullScanPrefilterFixture();
+    const start = new Date("2026-05-10T00:00:00.000Z");
+    const end = new Date("2026-05-10T23:59:59.999Z");
+    const report = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir,
+      scanAllFiles: true
+    });
+
+    expect(report.rows.map((row) => row.key)).toEqual(["2026-05-10"]);
+    expect(report.totals.calls).toBe(1);
+    expect(report.diagnostics).toMatchObject({
+      scanAllFiles: true,
+      prefilteredFiles: 1,
+      readFiles: 1,
+      readLines: 2,
+      includedUsageEvents: 1
+    });
+    expect(formatUsageStats(report, "table", { verbose: true })).toContain(
+      "Files skipped by full-scan prefilter: 1"
+    );
   });
 
   it("builds top session reports", async () => {
@@ -274,10 +414,24 @@ describe("stats", () => {
       "2026-05-10T10:00:02.000Z",
       "2026-05-11T10:00:03.000Z"
     ]);
+    expect(report.rows.map((row) => row.reasoningEffort)).toEqual(["high", "xhigh"]);
+    expect(report.byModel.map((row) => row.key)).toEqual(["gpt-5.5"]);
+    expect(report.byCwd.map((row) => row.key)).toEqual(["/repo/alpha"]);
+    expect(report.byReasoningEffort.map((row) => row.key)).toEqual(["xhigh", "high"]);
+    expect(report.modelSwitches).toBe(0);
+    expect(report.cwdSwitches).toBe(0);
+    expect(report.reasoningEffortSwitches).toBe(1);
     expect(report.totals.usage.totalTokens).toBe(38);
     expect(formatUsageSessionDetail(report)).toContain("Codex usage session detail");
+    expect(formatUsageSessionDetail(report)).toContain("By model:");
+    expect(formatUsageSessionDetail(report)).toContain("By cwd:");
+    expect(formatUsageSessionDetail(report)).toContain("By reasoning effort:");
     expect(formatUsageSessionDetail(report, "json")).toContain("\"sessionId\": \"session-a\"");
-    expect(formatUsageSessionDetail(report, "csv")).toContain("Time,Model,CWD");
+    expect(formatUsageSessionDetail(report, "json")).toContain("\"byReasoningEffort\"");
+    expect(formatUsageSessionDetail(report, "csv")).toContain("Range,Events,Model,Effort");
+    expect(formatUsageSessionDetail(report, "csv", { detail: true })).toContain(
+      "Time,Model,Effort,CWD"
+    );
 
     const streamedReport = await readCodexUsageSessionDetail(
       { start, end, limit: 1, sessionsDir },
@@ -286,6 +440,55 @@ describe("stats", () => {
 
     expect(streamedReport.rows).toHaveLength(1);
     expect(streamedReport.totals.calls).toBe(2);
+  });
+
+  it("compacts long session detail tables while preserving model and effort runs", () => {
+    const start = new Date("2026-05-10T00:00:00.000Z");
+    const end = new Date("2026-05-10T23:59:59.999Z");
+    const records = Array.from({ length: 30 }, (_, index) => ({
+      timestamp: new Date(Date.UTC(2026, 4, 10, 10, index, 0)),
+      sessionId: "session-long",
+      model: index < 15 ? "gpt-5.5" : "gpt-5.4",
+      reasoningEffort: index < 10 ? "high" : index < 20 ? "xhigh" : undefined,
+      cwd: index < 18 ? "/repo/alpha" : "/repo/beta",
+      filePath: "/tmp/session-long.jsonl",
+      usage: {
+        inputTokens: 10,
+        cachedInputTokens: 1,
+        outputTokens: 2,
+        reasoningOutputTokens: 1,
+        totalTokens: 12
+      }
+    }));
+    const report = buildUsageSessionDetail(records, { start, end, sessionsDir: "/tmp/sessions" }, "session-long");
+    const compactRows = buildUsageSessionCompactRows(report.rows);
+    const manyChangeRows = buildUsageSessionCompactRows(
+      records.map((record, index) => ({
+        timestamp: record.timestamp,
+        model: record.model,
+        reasoningEffort: `effort-${index}`,
+        cwd: record.cwd,
+        usage: record.usage,
+        credits: 0,
+        usd: 0,
+        priced: true,
+        filePath: record.filePath
+      }))
+    );
+
+    expect(compactRows.length).toBeLessThanOrEqual(20);
+    expect(compactRows.map((row) => `${row.model}:${row.reasoningEffort ?? "unknown"}`)).toContain(
+      "gpt-5.5:high"
+    );
+    expect(compactRows.map((row) => `${row.model}:${row.reasoningEffort ?? "unknown"}`)).toContain(
+      "gpt-5.4:unknown"
+    );
+    expect(formatUsageSessionDetail(report)).toContain("Compact view:");
+    expect(formatUsageSessionDetail(report)).toContain("Use --detail");
+    expect(formatUsageSessionDetail(report, "table", { detail: true })).not.toContain(
+      "Compact view:"
+    );
+    expect(manyChangeRows).toHaveLength(30);
   });
 
   it("reports unpriced models", () => {
@@ -343,7 +546,7 @@ async function createFixtureSessions() {
       JSON.stringify({
         timestamp: "2026-05-11T10:00:01.000Z",
         type: "turn_context",
-        payload: { model: "gpt-5.5" }
+        payload: { model: "gpt-5.5", reasoning_effort: "high" }
       }),
       JSON.stringify({
         timestamp: "2026-05-10T10:00:02.000Z",
@@ -354,6 +557,14 @@ async function createFixtureSessions() {
             last_token_usage: usage(10, 2, 3, 1, 13),
             total_token_usage: usage(10, 2, 3, 1, 13)
           }
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-11T10:00:02.500Z",
+        type: "turn_context",
+        payload: {
+          model: "gpt-5.5",
+          collaboration_mode: { settings: { reasoning_effort: "xhigh" } }
         }
       }),
       JSON.stringify({
@@ -440,6 +651,101 @@ async function createFixtureSessions() {
           type: "token_count",
           info: {
             total_token_usage: usage(1000, 0, 1000, 0, 2000)
+          }
+        }
+      })
+    ].join("\n")
+  );
+
+  return sessionsDir;
+}
+
+async function createLongSessionFixture() {
+  const root = await mkdtemp(join(tmpdir(), "codex-helper-stats-long-"));
+  const sessionsDir = join(root, "sessions");
+  const uncategorizedDir = join(sessionsDir, "uncategorized");
+  await mkdir(uncategorizedDir, { recursive: true });
+
+  await writeFile(
+    join(uncategorizedDir, "rollout-2026-05-01T09-00-00-long-session.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-01T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "long-session", model: "gpt-5.5", cwd: "/repo/long" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: usage(100, 10, 20, 5, 120),
+            total_token_usage: usage(100, 10, 20, 5, 120)
+          }
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-13T10:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: usage(1, 0, 1, 0, 2),
+            total_token_usage: usage(101, 10, 21, 5, 122)
+          }
+        }
+      })
+    ].join("\n")
+  );
+
+  return sessionsDir;
+}
+
+async function createFullScanPrefilterFixture() {
+  const root = await mkdtemp(join(tmpdir(), "codex-helper-stats-prefilter-"));
+  const sessionsDir = join(root, "sessions");
+  const dir = join(sessionsDir, "uncategorized");
+  await mkdir(dir, { recursive: true });
+
+  await writeFile(
+    join(dir, "rollout-2026-05-01T09-00-00-old-session.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-01T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "old-session", model: "gpt-5.5", cwd: "/repo/old" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-02T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: usage(1000, 0, 1000, 0, 2000),
+            total_token_usage: usage(1000, 0, 1000, 0, 2000)
+          }
+        }
+      })
+    ].join("\n")
+  );
+
+  await writeFile(
+    join(dir, "rollout-2026-05-01T09-00-00-in-range-session.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-01T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "in-range-session", model: "gpt-5.5", cwd: "/repo/in-range" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: usage(100, 10, 20, 5, 120),
+            total_token_usage: usage(100, 10, 20, 5, 120)
           }
         }
       })

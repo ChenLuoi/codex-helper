@@ -1,6 +1,8 @@
-import { chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { readdir, readFile, unlink } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { defaultCodexHome, resolveCodexHelperDir, writeSensitiveFile } from "./storage.js";
+
+export { resolveCodexHelperDir, writeSensitiveFile } from "./storage.js";
 
 export type JsonValue =
   | string
@@ -12,6 +14,10 @@ export type JsonValue =
 export type JsonObject = { [key: string]: JsonValue };
 
 export type AuthStatusFormat = "table" | "json";
+
+export type AuthStatusJsonOptions = {
+  includeTokenClaims?: boolean;
+};
 
 export type RawAuthStatusOptions = {
   authFile?: string;
@@ -184,7 +190,7 @@ export function resolveCodexAuthProfileStoreDir(options: RawAuthProfileOptions =
     return resolve(options.storeDir);
   }
 
-  return join(dirname(resolveCodexAuthFile(options)), "auth-profiles");
+  return join(resolveCodexHelperDir({ codexHome: options.codexHome }), "auth-profiles");
 }
 
 export async function saveCurrentCodexAuthProfile(
@@ -196,7 +202,6 @@ export async function saveCurrentCodexAuthProfile(
   const current = await readCodexAuthFile(authFile, now);
   const profileFile = resolveCodexAuthProfileFile(storeDir, current.accountId);
 
-  await mkdir(storeDir, { recursive: true });
   await writeSensitiveFile(profileFile, current.content);
 
   return {
@@ -332,10 +337,11 @@ export function decodeJwt(token: string, tokenName = "JWT"): JwtParts {
 
 export function formatAuthStatus(
   report: AuthStatusReport,
-  format: AuthStatusFormat = "table"
+  format: AuthStatusFormat = "table",
+  options: AuthStatusJsonOptions = {}
 ): string {
   if (format === "json") {
-    return `${JSON.stringify(toAuthStatusJson(report), null, 2)}\n`;
+    return `${JSON.stringify(toAuthStatusJson(report, options), null, 2)}\n`;
   }
 
   const lines = ["Codex auth"];
@@ -358,12 +364,14 @@ export function formatAuthStatus(
   return `${lines.join("\n")}\n`;
 }
 
-export function toAuthStatusJson(report: AuthStatusReport) {
-  return {
+export function toAuthStatusJson(
+  report: AuthStatusReport,
+  options: AuthStatusJsonOptions = {}
+) {
+  const json: Record<string, unknown> = {
     authFile: report.authFile,
     tokenName: report.tokenName,
-    header: report.header,
-    claims: report.claims,
+    tokenClaimsIncluded: options.includeTokenClaims === true,
     summary: {
       ...report.summary,
       lastRefresh: report.summary.lastRefresh?.toISOString(),
@@ -377,6 +385,13 @@ export function toAuthStatusJson(report: AuthStatusReport) {
       subscriptionLastChecked: report.summary.subscriptionLastChecked?.toISOString()
     }
   };
+
+  if (options.includeTokenClaims === true) {
+    json.header = report.header;
+    json.claims = report.claims;
+  }
+
+  return json;
 }
 
 async function readCodexAuthFile(filePath: string, now: Date): Promise<ParsedAuthFile> {
@@ -468,31 +483,6 @@ function getAuthAccountId(report: AuthStatusReport) {
 
 function resolveCodexAuthProfileFile(storeDir: string, accountId: string) {
   return join(storeDir, `${encodeURIComponent(accountId)}.json`);
-}
-
-async function writeSensitiveFile(filePath: string, content: string) {
-  await mkdir(dirname(filePath), { recursive: true });
-  const tempFile = join(
-    dirname(filePath),
-    `.${encodeURIComponent(`${Date.now()}-${process.pid}`)}.${encodeURIComponent(
-      basenameForTemp(filePath)
-    )}.tmp`
-  );
-
-  try {
-    await writeFile(tempFile, content, { mode: 0o600 });
-    await chmod(tempFile, 0o600).catch(() => undefined);
-    await rename(tempFile, filePath);
-    await chmod(filePath, 0o600).catch(() => undefined);
-  } catch (error) {
-    await unlink(tempFile).catch(() => undefined);
-    throw error;
-  }
-}
-
-function basenameForTemp(filePath: string) {
-  const parts = filePath.split(/[\\/]/);
-  return parts.at(-1) ?? "auth.json";
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
@@ -739,8 +729,4 @@ function formatOrganization(organization: AuthOrganization) {
 
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function defaultCodexHome() {
-  return process.env.CODEX_HOME ?? join(homedir(), ".codex");
 }

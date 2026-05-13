@@ -9,6 +9,7 @@ import {
   listCodexAuthProfiles,
   removeCodexAuthProfile,
   resolveCodexAuthProfileStoreDir,
+  resolveCodexHelperDir,
   saveCurrentCodexAuthProfile,
   switchCodexAuthProfile,
   type CodexAuthJson,
@@ -111,7 +112,7 @@ describe("auth", () => {
     expect(text).not.toContain(idToken);
   });
 
-  it("prints decoded header and claims in JSON output", () => {
+  it("omits decoded header and claims from JSON output by default", () => {
     const idToken = createJwt({ sub: "user_123", exp: timestamp("2026-05-13T00:00:00.000Z") });
     const report = buildCodexAuthStatus(
       {
@@ -126,16 +127,38 @@ describe("auth", () => {
 
     expect(JSON.parse(formatAuthStatus(report, "json"))).toMatchObject({
       tokenName: "id_token",
+      tokenClaimsIncluded: false,
+      summary: {
+        subject: "user_123",
+        expiresAt: "2026-05-13T00:00:00.000Z"
+      }
+    });
+    expect(JSON.parse(formatAuthStatus(report, "json"))).not.toHaveProperty("header");
+    expect(JSON.parse(formatAuthStatus(report, "json"))).not.toHaveProperty("claims");
+  });
+
+  it("prints decoded header and claims in JSON output only when explicitly requested", () => {
+    const idToken = createJwt({ sub: "user_123", exp: timestamp("2026-05-13T00:00:00.000Z") });
+    const report = buildCodexAuthStatus(
+      {
+        tokens: {
+          id_token: idToken,
+          refresh_token: "not-a-jwt"
+        }
+      } satisfies CodexAuthJson,
+      "/tmp/auth.json",
+      new Date("2026-05-12T00:00:00.000Z")
+    );
+
+    expect(JSON.parse(formatAuthStatus(report, "json", { includeTokenClaims: true }))).toMatchObject({
+      tokenName: "id_token",
+      tokenClaimsIncluded: true,
       header: {
         alg: "RS256",
         kid: "key-1"
       },
       claims: {
         sub: "user_123"
-      },
-      summary: {
-        subject: "user_123",
-        expiresAt: "2026-05-13T00:00:00.000Z"
       }
     });
   });
@@ -172,16 +195,39 @@ describe("auth", () => {
     }
   });
 
-  it("derives the default profile store from --auth-file before --codex-home", async () => {
+  it("derives the default profile store from the helper directory under --codex-home", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-auth-path-"));
 
     try {
       const authFile = join(tempDir, "fixture-home", "auth.json");
-      const codexHome = join(tempDir, "other-home");
+      const codexHome = join(tempDir, "codex-home");
+      const storeDir = join(codexHome, "codex-helper", "auth-profiles");
 
-      expect(resolveCodexAuthProfileStoreDir({ authFile, codexHome })).toBe(
-        join(tempDir, "fixture-home", "auth-profiles")
+      expect(resolveCodexHelperDir({ codexHome })).toBe(join(codexHome, "codex-helper"));
+      expect(resolveCodexAuthProfileStoreDir({ authFile, codexHome })).toBe(storeDir);
+      expect(resolveCodexAuthProfileStoreDir({ storeDir: join(tempDir, "custom"), codexHome })).toBe(
+        join(tempDir, "custom")
       );
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it("saves profiles to the helper store by default even when --auth-file is supplied", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-auth-default-store-"));
+    const authFile = join(tempDir, "fixture-home", "auth.json");
+    const codexHome = join(tempDir, "codex-home");
+    const content = createAuthContent("account-a", "User A", "a@example.test", "plus");
+
+    try {
+      await mkdir(join(tempDir, "fixture-home"), { recursive: true });
+      await writeFile(authFile, content);
+
+      const report = await saveCurrentCodexAuthProfile({ authFile, codexHome });
+      const expectedStoreDir = join(codexHome, "codex-helper", "auth-profiles");
+
+      expect(report.storeDir).toBe(expectedStoreDir);
+      expect(await readFile(join(expectedStoreDir, "account-a.json"), "utf8")).toBe(content);
     } finally {
       await rm(tempDir, { force: true, recursive: true });
     }

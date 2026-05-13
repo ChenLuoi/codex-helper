@@ -1,11 +1,27 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
+import inquirer, { type Answers, type Question } from "inquirer";
 import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ora from "ora";
 import pc from "picocolors";
+import { formatDoctorReport, readDoctorReport } from "./doctor.js";
+import {
+  addWeeklyCycleAnchorsToFile,
+  buildWeeklyCycleDetailReport,
+  buildWeeklyCycleCurrentReport,
+  buildWeeklyCycleHistoryReport,
+  formatWeeklyCycleAnchorList,
+  formatWeeklyCycleCurrent,
+  formatWeeklyCycleDetail,
+  formatWeeklyCycleHistory,
+  listWeeklyCycleAnchorsFromFile,
+  removeWeeklyCycleAnchorFromFile,
+  type WeeklyCycleAnchor,
+  type WeeklyCycleReportRow
+} from "./cycles.js";
 import {
   formatAuthProfileEntry,
   formatAuthProfileList,
@@ -21,11 +37,15 @@ import {
   formatUsageSessionDetail,
   formatUsageSessions,
   formatUsageStats,
+  readCodexUsageRecordsReport,
   readCodexUsageSessionDetail,
   readCodexUsageSessions,
   readCodexUsageStats,
   resolveStatRangeOptions,
-  resolveStatOptions
+  resolveStatOptions,
+  type StatFormat,
+  type UsageDiagnostics,
+  type UsageRecord
 } from "./stats.js";
 
 const packageVersion = readPackageVersion();
@@ -47,13 +67,18 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--auth-file <path>", "path to auth.json")
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
     .option("--json", "print JSON")
+    .option("--include-token-claims", "include decoded JWT header and claims in JSON output")
     .action(async (options: AuthStatusCommandOptions) => {
       const report = await readCodexAuthStatus({
         authFile: options.authFile,
         codexHome: options.codexHome
       });
       output.write(
-        withTrailingNewline(formatAuthStatus(report, options.json === true ? "json" : "table"))
+        withTrailingNewline(
+          formatAuthStatus(report, options.json === true ? "json" : "table", {
+            includeTokenClaims: options.includeTokenClaims === true
+          })
+        )
       );
     });
 
@@ -216,11 +241,28 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
   program
     .command("doctor")
     .description("Run a quick local environment check.")
-    .action(async () => {
-      const spinner = ora("Checking local environment").start();
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      spinner.succeed("Local environment looks ready.");
-      output.write(`${pc.green("Node.js")} ${process.version}\n`);
+    .option("--auth-file <path>", "path to auth.json")
+    .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
+    .option("--sessions-dir <path>", "Codex sessions directory")
+    .option("--cycle-file <path>", "weekly cycle anchor store file")
+    .option("--json", "print JSON")
+    .action(async (options: DoctorCommandOptions) => {
+      const spinner = options.json === true ? undefined : ora("Checking local environment").start();
+      try {
+        const report = await readDoctorReport({
+          authFile: options.authFile,
+          codexHome: options.codexHome,
+          sessionsDir: options.sessionsDir,
+          cycleFile: options.cycleFile
+        });
+        const errors = report.checks.filter((check) => check.status === "error").length;
+        const warnings = report.checks.filter((check) => check.status === "warn").length;
+        spinner?.succeed(`Finished with ${errors} error(s), ${warnings} warning(s).`);
+        output.write(withTrailingNewline(formatDoctorReport(report, options.json === true ? "json" : "table")));
+      } catch (error) {
+        spinner?.fail("Failed to check local environment.");
+        throw error;
+      }
     });
 
   const statCommand = program
@@ -230,6 +272,10 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--sort <sort>", "sort rows by: time, tokens, credits, calls, sessions")
     .option("--limit <n>", "maximum number of rows to show")
     .option("--top <n>", "number of sessions to show when view is sessions")
+    .option("--detail", "show full event-level rows for stat sessions <session-id>")
+    .option("--full-scan", "scan all session files instead of pruning by date")
+    .option("--all", "include all session usage instead of a date range")
+    .option("--reasoning-effort", "include reasoning effort in model grouping")
     .option("--verbose", "show scan and parsing diagnostics");
   addStatRangeOptions(statCommand);
   addStatFormatOptions(statCommand);
@@ -247,7 +293,10 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
 
       try {
         if (view === undefined) {
-          const statOptions = resolveStatOptions(commandOptions);
+          const statOptions = {
+            ...resolveStatOptions(commandOptions),
+            scanAllFiles: commandOptions.fullScan === true
+          };
           spinner =
             statOptions.format === "table" ? ora("Reading Codex session usage").start() : undefined;
           const report = await readCodexUsageStats(statOptions);
@@ -264,16 +313,21 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
           const sessionOptions = resolveStatRangeOptions(commandOptions);
 
           if (session !== undefined) {
+            const detailOptions = {
+              ...sessionOptions,
+              scanAllFiles: true
+            };
             spinner =
               sessionOptions.format === "table"
                 ? ora("Reading Codex session usage").start()
                 : undefined;
-            const report = await readCodexUsageSessionDetail(sessionOptions, session);
+            const report = await readCodexUsageSessionDetail(detailOptions, session);
             spinner?.succeed(`Read ${report.totals.calls} usage events.`);
             output.write(
               withTrailingNewline(
                 formatUsageSessionDetail(report, sessionOptions.format, {
-                  verbose: sessionOptions.verbose
+                  verbose: sessionOptions.verbose,
+                  detail: commandOptions.detail === true
                 })
               )
             );
@@ -284,9 +338,13 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
             commandOptions.top === undefined
               ? sessionOptions.limit ?? 10
               : parseTopLimit(commandOptions.top);
+          const listOptions = {
+            ...sessionOptions,
+            scanAllFiles: commandOptions.fullScan === true
+          };
           spinner =
             sessionOptions.format === "table" ? ora("Reading Codex session usage").start() : undefined;
-          const report = await readCodexUsageSessions(sessionOptions, top);
+          const report = await readCodexUsageSessions(listOptions, top);
           spinner?.succeed(`Read ${report.totals.calls} usage events.`);
           output.write(
             withTrailingNewline(
@@ -303,6 +361,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
       }
     }
   );
+  addCycleCommands(program, output);
 
   return program;
 }
@@ -317,16 +376,63 @@ type StatCommandOptions = {
   today?: boolean;
   yesterday?: boolean;
   month?: boolean;
+  all?: boolean;
+  reasoningEffort?: boolean;
   last?: string;
   sort?: string;
   limit?: string;
+  detail?: boolean;
+  fullScan?: boolean;
   verbose?: boolean;
   json?: boolean;
+};
+
+type CycleBaseOptions = {
+  authFile?: string;
+  codexHome?: string;
+  cycleFile?: string;
+  accountId?: string;
+};
+
+type CycleFormattedOptions = CycleBaseOptions & {
+  format?: string;
+  json?: boolean;
+};
+
+type CycleAnchorAddOptions = CycleBaseOptions & {
+  note?: string;
+};
+
+type CycleUsageOptions = CycleFormattedOptions & {
+  sessionsDir?: string;
+  start?: string;
+  end?: string;
+  today?: boolean;
+  yesterday?: boolean;
+  month?: boolean;
+  all?: boolean;
+  last?: string;
+  estimateBeforeAnchor?: boolean;
+  select?: boolean;
+};
+
+type CycleUsageReadResult = {
+  records: UsageRecord[];
+  diagnostics?: UsageDiagnostics;
 };
 
 type AuthStatusCommandOptions = {
   authFile?: string;
   codexHome?: string;
+  json?: boolean;
+  includeTokenClaims?: boolean;
+};
+
+type DoctorCommandOptions = {
+  authFile?: string;
+  codexHome?: string;
+  sessionsDir?: string;
+  cycleFile?: string;
   json?: boolean;
 };
 
@@ -346,6 +452,351 @@ function toAuthProfileOptions(options: AuthProfileCommandOptions) {
   };
 }
 
+function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
+  const cycleCommand = program
+    .command("cycle")
+    .description("Manage Codex weekly limit cycle anchors and usage reports.");
+
+  const addCommand = cycleCommand
+    .command("add")
+    .description("Add a weekly cycle anchor.")
+    .argument("<time...>", "weekly cycle start time")
+    .option("--note <text>", "anchor note");
+  addCycleStateOptions(addCommand);
+  addCommand.action(async (timeParts: string[], options: CycleAnchorAddOptions) => {
+    const report = await addWeeklyCycleAnchorsToFile({
+      ...(await toCycleStateOptions(options)),
+      at: parseCycleAddTimes(timeParts),
+      note: options.note
+    });
+
+    if (report.anchors.length === 1) {
+      const anchor = report.anchors[0];
+      if (anchor === undefined) {
+        throw new Error("No weekly cycle anchor was added.");
+      }
+      output.write(`Added weekly cycle anchor: ${anchor.id}\n`);
+      output.write(`At: ${anchor.at}\n`);
+    } else {
+      output.write(`Added ${report.anchors.length} weekly cycle anchors:\n`);
+      for (const anchor of report.anchors) {
+        output.write(`- ${anchor.id} at ${anchor.at}\n`);
+      }
+    }
+
+    output.write(`Account: ${report.accountId} (${report.accountSource})\n`);
+    output.write(`Cycle file: ${report.cycleFile}\n`);
+  });
+
+  const listCommand = cycleCommand
+    .command("list")
+    .description("List weekly cycle anchors.");
+  addCycleStateOptions(listCommand);
+  addStatFormatOptions(listCommand);
+  listCommand.action(async (options: CycleFormattedOptions) => {
+    const report = await listWeeklyCycleAnchorsFromFile(await toCycleStateOptions(options));
+    output.write(
+      withTrailingNewline(formatWeeklyCycleAnchorList(report, resolveCycleFormat(options)))
+    );
+  });
+
+  const removeCommand = cycleCommand
+    .command("remove")
+    .description("Remove a weekly cycle anchor.")
+    .argument("<id>", "anchor id");
+  addCycleStateOptions(removeCommand);
+  removeCommand.action(async (anchorId: string, options: CycleBaseOptions) => {
+    const report = await removeWeeklyCycleAnchorFromFile(
+      anchorId,
+      await toCycleStateOptions(options)
+    );
+
+    output.write(`Removed weekly cycle anchor: ${report.anchor.id}\n`);
+    output.write(`Account: ${report.accountId} (${report.accountSource})\n`);
+    output.write(`Cycle file: ${report.cycleFile}\n`);
+  });
+
+  const currentCommand = cycleCommand
+    .command("current")
+    .description("Show the current weekly cycle.");
+  addCycleStateOptions(currentCommand);
+  currentCommand.option("--sessions-dir <path>", "Codex sessions directory");
+  addStatFormatOptions(currentCommand);
+  currentCommand.action(async (options: CycleUsageOptions) => {
+    const format = resolveCycleFormat(options);
+    const anchorReport = await listWeeklyCycleAnchorsFromFile(await toCycleStateOptions(options));
+    const now = new Date();
+    const usageReport = await readWeeklyCycleUsageForCurrent(anchorReport.anchors, options, now);
+    const report = buildWeeklyCycleCurrentReport({
+      anchors: anchorReport.anchors,
+      records: usageReport.records,
+      now,
+      usageDiagnostics: usageReport.diagnostics
+    });
+
+    output.write(
+      withTrailingNewline(
+        formatWeeklyCycleCurrent(report, format, {
+          accountId: anchorReport.accountId,
+          accountSource: anchorReport.accountSource,
+          cycleFile: anchorReport.cycleFile
+        })
+      )
+    );
+  });
+
+  const historyCommand = cycleCommand
+    .command("history")
+    .description("Show weekly cycle history.")
+    .argument("[cycle-id]", "cycle id to show in detail")
+    .option("--select", "interactively select a cycle to show in detail")
+    .option("--estimate-before-anchor", "include estimated cycles before the earliest anchor");
+  addCycleStateOptions(historyCommand, { codexHome: false });
+  addStatRangeOptions(historyCommand);
+  addStatFormatOptions(historyCommand);
+  historyCommand.action(async (cycleId: string | undefined, options: CycleUsageOptions) => {
+    const format = resolveCycleFormat(options);
+    const rangeOptions = resolveStatRangeOptions(options);
+    const anchorReport = await listWeeklyCycleAnchorsFromFile(await toCycleStateOptions(options));
+    const usageReport = await readWeeklyCycleUsageForHistory(
+      anchorReport.anchors,
+      options,
+      rangeOptions
+    );
+    const report = buildWeeklyCycleHistoryReport({
+      anchors: anchorReport.anchors,
+      records: usageReport.records,
+      start: rangeOptions.start,
+      end: rangeOptions.end,
+      estimateBeforeAnchor: options.estimateBeforeAnchor === true,
+      usageDiagnostics: usageReport.diagnostics
+    });
+
+    const selectedCycleId = await resolveCycleHistoryDetailId(cycleId, options, report.rows, output);
+    if (selectedCycleId !== undefined) {
+      const detail = buildWeeklyCycleDetailReport({
+        history: report,
+        cycleId: selectedCycleId,
+        records: usageReport.records,
+        usageDiagnostics: usageReport.diagnostics
+      });
+
+      output.write(
+        withTrailingNewline(
+          formatWeeklyCycleDetail(detail, format, {
+            accountId: anchorReport.accountId,
+            accountSource: anchorReport.accountSource,
+            cycleFile: anchorReport.cycleFile
+          })
+        )
+      );
+      return;
+    }
+
+    output.write(
+      withTrailingNewline(
+        formatWeeklyCycleHistory(report, format, {
+          accountId: anchorReport.accountId,
+          accountSource: anchorReport.accountSource,
+          cycleFile: anchorReport.cycleFile
+        })
+      )
+    );
+  });
+}
+
+function parseCycleAddTimes(timeParts: string[]) {
+  const tokens = timeParts.flatMap((part) =>
+    part
+      .split(",")
+      .map((token) => token.trim())
+      .filter((token) => token.length > 0)
+  );
+  const times: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const next = tokens[index + 1];
+
+    if (token === undefined) {
+      continue;
+    }
+
+    if (next !== undefined && isDateOnlyToken(token) && isTimeOnlyToken(next)) {
+      times.push(`${token} ${next}`);
+      index += 1;
+      continue;
+    }
+
+    times.push(token);
+  }
+
+  if (times.length === 0) {
+    throw new Error("cycle add requires at least one weekly cycle start time.");
+  }
+
+  return times;
+}
+
+function isDateOnlyToken(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function isTimeOnlyToken(value: string) {
+  return /^\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value);
+}
+
+function addCycleStateOptions(command: Command, options: { codexHome?: boolean } = {}) {
+  command.option("--auth-file <path>", "path to auth.json");
+
+  if (options.codexHome !== false) {
+    command.option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME);
+  }
+
+  command
+    .option("--cycle-file <path>", "weekly cycle anchor store file")
+    .option("--account-id <id>", "weekly cycle account id");
+}
+
+async function toCycleStateOptions(options: CycleBaseOptions) {
+  return {
+    authStatus: await readCycleAuthStatus(options),
+    codexHome: options.codexHome,
+    cycleFile: options.cycleFile,
+    accountId: options.accountId
+  };
+}
+
+async function readCycleAuthStatus(options: CycleBaseOptions) {
+  if (options.accountId !== undefined) {
+    return undefined;
+  }
+
+  try {
+    return await readCodexAuthStatus({
+      authFile: options.authFile,
+      codexHome: options.codexHome
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function readWeeklyCycleUsageForCurrent(
+  anchors: WeeklyCycleAnchor[],
+  options: Pick<CycleUsageOptions, "codexHome" | "sessionsDir">,
+  now: Date
+): Promise<CycleUsageReadResult> {
+  const earliestAnchor = earliestAnchorDate(anchors);
+
+  if (earliestAnchor === undefined || earliestAnchor > now) {
+    return { records: [] };
+  }
+
+  const report = await readCodexUsageRecordsReport({
+    sessionsDir: resolveCycleSessionsDir(options),
+    start: earliestAnchor,
+    end: now,
+    scanAllFiles: true
+  });
+
+  return {
+    records: report.records,
+    diagnostics: report.diagnostics
+  };
+}
+
+async function readWeeklyCycleUsageForHistory(
+  anchors: WeeklyCycleAnchor[],
+  options: CycleUsageOptions,
+  rangeOptions: ReturnType<typeof resolveStatRangeOptions>
+): Promise<CycleUsageReadResult> {
+  const earliestAnchor = earliestAnchorDate(anchors);
+  const scanStart =
+    earliestAnchor === undefined
+      ? undefined
+      : options.estimateBeforeAnchor === true && rangeOptions.start < earliestAnchor
+        ? rangeOptions.start
+        : earliestAnchor;
+
+  if (scanStart === undefined || scanStart > rangeOptions.end) {
+    return { records: [] };
+  }
+
+  const report = await readCodexUsageRecordsReport({
+    sessionsDir: rangeOptions.sessionsDir,
+    start: scanStart,
+    end: rangeOptions.end,
+    scanAllFiles: true
+  });
+
+  return {
+    records: report.records,
+    diagnostics: report.diagnostics
+  };
+}
+
+function earliestAnchorDate(anchors: WeeklyCycleAnchor[]) {
+  return anchors
+    .map((anchor) => new Date(anchor.at))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((left, right) => left.getTime() - right.getTime())[0];
+}
+
+function resolveCycleSessionsDir(options: Pick<CycleUsageOptions, "codexHome" | "sessionsDir">) {
+  return resolveStatRangeOptions({
+    codexHome: options.codexHome,
+    sessionsDir: options.sessionsDir,
+    all: true
+  }).sessionsDir;
+}
+
+function resolveCycleFormat(options: Pick<CycleFormattedOptions, "format" | "json">): StatFormat {
+  const format = options.json === true ? "json" : options.format ?? "table";
+
+  if (format === "table" || format === "json" || format === "csv" || format === "markdown") {
+    return format;
+  }
+
+  throw new Error("Invalid format value. Expected one of: table, json, csv, markdown.");
+}
+
+async function resolveCycleHistoryDetailId(
+  cycleId: string | undefined,
+  options: Pick<CycleUsageOptions, "select">,
+  rows: WeeklyCycleReportRow[],
+  output: NodeJS.WritableStream
+) {
+  if (cycleId !== undefined && options.select === true) {
+    throw new Error("cycle history accepts either a cycle id or --select, not both.");
+  }
+
+  if (cycleId !== undefined) {
+    return cycleId;
+  }
+
+  if (options.select !== true) {
+    return undefined;
+  }
+
+  if (rows.length === 0) {
+    output.write("No weekly cycles to select.\n");
+    return undefined;
+  }
+
+  if (!canPromptList()) {
+    throw new Error("cycle history --select requires an interactive terminal unless a cycle id is supplied.");
+  }
+
+  const selected = await promptWeeklyCycleSelection("Select weekly cycle to show", rows, output);
+
+  if (selected === undefined) {
+    output.write("Cancelled.\n");
+  }
+
+  return selected?.id;
+}
+
 function canPromptLine() {
   return process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
@@ -354,39 +805,72 @@ function canPromptList() {
   return canPromptLine() && typeof process.stdin.setRawMode === "function";
 }
 
+const cancelPromptValue = "__codex_helper_cancel__";
+
+async function promptWeeklyCycleSelection(
+  label: string,
+  rows: WeeklyCycleReportRow[],
+  output: NodeJS.WritableStream
+) {
+  const answers = await runInquirerPrompt<{ cycleId: string }>(
+    output,
+    [
+      {
+        type: "select",
+        name: "cycleId",
+        message: label,
+        pageSize: 12,
+        choices: [
+          ...rows.map((row) => ({
+            name: formatWeeklyCycleChoice(row),
+            value: row.id,
+            short: row.id
+          })),
+          new inquirer.Separator(),
+          { name: "Cancel", value: cancelPromptValue, short: "Cancel" }
+        ]
+      }
+    ]
+  );
+
+  if (answers === undefined || answers.cycleId === cancelPromptValue) {
+    return undefined;
+  }
+
+  return rows.find((row) => row.id === answers.cycleId);
+}
+
 async function promptAuthProfileSelection(
   label: string,
   entries: AuthProfileEntry[],
   output: NodeJS.WritableStream
 ) {
-  let cursor = 0;
-
-  return withRawMode<AuthProfileEntry | undefined>(output, undefined, (render, finish) => {
-    renderSelectionList(label, entries, cursor, render);
-
-    return (key) => {
-      if (isCancelKey(key)) {
-        finish(undefined);
-        return;
+  const answers = await runInquirerPrompt<{ accountId: string }>(
+    output,
+    [
+      {
+        type: "select",
+        name: "accountId",
+        message: label,
+        pageSize: 12,
+        choices: [
+          ...entries.map((entry) => ({
+            name: formatAuthProfileEntry(entry),
+            value: entry.accountId,
+            short: entry.accountId
+          })),
+          new inquirer.Separator(),
+          { name: "Cancel", value: cancelPromptValue, short: "Cancel" }
+        ]
       }
+    ]
+  );
 
-      if (key.name === "up") {
-        cursor = wrapIndex(cursor - 1, entries.length);
-        renderSelectionList(label, entries, cursor, render);
-        return;
-      }
+  if (answers === undefined || answers.accountId === cancelPromptValue) {
+    return undefined;
+  }
 
-      if (key.name === "down") {
-        cursor = wrapIndex(cursor + 1, entries.length);
-        renderSelectionList(label, entries, cursor, render);
-        return;
-      }
-
-      if (key.name === "return") {
-        finish(entries[cursor]);
-      }
-    };
-  });
+  return entries.find((entry) => entry.accountId === answers.accountId);
 }
 
 async function promptAuthProfileMultiSelection(
@@ -394,178 +878,82 @@ async function promptAuthProfileMultiSelection(
   entries: AuthProfileEntry[],
   output: NodeJS.WritableStream
 ) {
-  let cursor = 0;
-  const selectedIndexes = new Set<number>();
-
-  return withRawMode<AuthProfileEntry[]>(output, [], (render, finish) => {
-    renderMultiSelectionList(label, entries, cursor, selectedIndexes, render);
-
-    return (key) => {
-      if (isCancelKey(key)) {
-        finish([]);
-        return;
+  const answers = await runInquirerPrompt<{ accountIds: string[] }>(
+    output,
+    [
+      {
+        type: "checkbox",
+        name: "accountIds",
+        message: label,
+        pageSize: 12,
+        choices: entries.map((entry) => ({
+          name: formatAuthProfileEntry(entry),
+          value: entry.accountId,
+          short: entry.accountId
+        }))
       }
+    ]
+  );
 
-      if (key.name === "up") {
-        cursor = wrapIndex(cursor - 1, entries.length);
-        renderMultiSelectionList(label, entries, cursor, selectedIndexes, render);
-        return;
-      }
+  if (answers === undefined) {
+    return [];
+  }
 
-      if (key.name === "down") {
-        cursor = wrapIndex(cursor + 1, entries.length);
-        renderMultiSelectionList(label, entries, cursor, selectedIndexes, render);
-        return;
-      }
+  const selectedAccountIds = new Set(answers.accountIds);
 
-      if (key.name === "space") {
-        if (selectedIndexes.has(cursor)) {
-          selectedIndexes.delete(cursor);
-        } else {
-          selectedIndexes.add(cursor);
-        }
-        renderMultiSelectionList(label, entries, cursor, selectedIndexes, render);
-        return;
-      }
-
-      if (key.name === "return") {
-        finish(
-          [...selectedIndexes]
-            .sort((left, right) => left - right)
-            .map((index) => entries[index])
-            .filter((entry): entry is AuthProfileEntry => entry !== undefined)
-        );
-      }
-    };
-  });
+  return entries.filter((entry) => selectedAccountIds.has(entry.accountId));
 }
 
 async function promptConfirmation(question: string, output: NodeJS.WritableStream) {
-  const answer = (await promptLine(`${question} Type yes to confirm: `, output))
-    .trim()
-    .toLowerCase();
+  const answers = await runInquirerPrompt<{ confirmed: boolean }>(
+    output,
+    [
+      {
+        type: "confirm",
+        name: "confirmed",
+        message: question,
+        default: false
+      }
+    ]
+  );
 
-  return answer === "yes" || answer === "y";
+  return answers?.confirmed === true;
 }
 
-async function promptLine(question: string, output: NodeJS.WritableStream) {
-  const { createInterface } = await import("node:readline/promises");
-  const readline = createInterface({
+async function runInquirerPrompt<T extends Answers>(
+  output: NodeJS.WritableStream,
+  questions: readonly InquirerQuestion<T>[]
+) {
+  const prompt = inquirer.createPromptModule({
     input: process.stdin,
     output
   });
 
   try {
-    return await readline.question(question);
-  } finally {
-    readline.close();
+    return await prompt(questions);
+  } catch (error) {
+    if (isInquirerExitPromptError(error)) {
+      process.exitCode = 130;
+      return undefined;
+    }
+
+    throw error;
   }
 }
 
-type KeypressKey = {
-  name?: string;
-  ctrl?: boolean;
-  sequence?: string;
-};
-
-type RawModeHandler<T> = (
-  render: (lines: string[]) => void,
-  finish: (value: T) => void
-) => (key: KeypressKey) => void;
-
-async function withRawMode<T>(
-  output: NodeJS.WritableStream,
-  cancelValue: T,
-  createHandler: RawModeHandler<T>
-) {
-  const { emitKeypressEvents } = await import("node:readline");
-  const input = process.stdin;
-  const previousRawMode = input.isRaw === true;
-  let renderedLines = 0;
-
-  return await new Promise<T>((resolve) => {
-    const render = (lines: string[]) => {
-      if (renderedLines > 0) {
-        output.write(`\x1b[${renderedLines}A`);
-      } else {
-        output.write("\x1b[?25l");
-      }
-
-      for (const line of lines) {
-        output.write(`\x1b[2K${line}\n`);
-      }
-
-      renderedLines = lines.length;
-    };
-    const cleanup = () => {
-      input.off("keypress", onKeypress);
-      input.setRawMode(previousRawMode);
-      input.pause();
-      output.write("\x1b[?25h");
-    };
-    const finish = (value: T) => {
-      cleanup();
-      resolve(value);
-    };
-    const handler = createHandler(render, finish);
-    const onKeypress = (_input: string, key: KeypressKey = {}) => {
-      if (key.ctrl === true && key.name === "c") {
-        cleanup();
-        process.exitCode = 130;
-        resolve(cancelValue);
-        return;
-      }
-
-      handler(key);
-    };
-
-    emitKeypressEvents(input);
-    input.setRawMode(true);
-    input.resume();
-    input.on("keypress", onKeypress);
-  });
+function isInquirerExitPromptError(error: unknown) {
+  return error instanceof Error && error.name === "ExitPromptError";
 }
 
-function renderSelectionList(
-  label: string,
-  entries: AuthProfileEntry[],
-  cursor: number,
-  render: (lines: string[]) => void
-) {
-  render([
-    label,
-    "Use Up/Down to move, Enter to select, q to cancel.",
-    "",
-    ...entries.map((entry, index) => `${index === cursor ? "> " : "  "}${formatAuthProfileEntry(entry)}`)
-  ]);
-}
+type InquirerQuestion<T extends Answers> = Question<T> & Record<string, unknown>;
 
-function renderMultiSelectionList(
-  label: string,
-  entries: AuthProfileEntry[],
-  cursor: number,
-  selectedIndexes: Set<number>,
-  render: (lines: string[]) => void
-) {
-  render([
-    label,
-    "Use Up/Down to move, Space to toggle, Enter to confirm, q to cancel.",
-    "",
-    ...entries.map(
-      (entry, index) =>
-        `${index === cursor ? "> " : "  "}[${selectedIndexes.has(index) ? "x" : " "}] ${formatAuthProfileEntry(
-          entry
-        )}`
-    )
-  ]);
-}
-
-function wrapIndex(index: number, length: number) {
-  return ((index % length) + length) % length;
-}
-
-function isCancelKey(key: KeypressKey) {
-  return key.name === "escape" || key.name === "q";
+function formatWeeklyCycleChoice(row: WeeklyCycleReportRow) {
+  return [
+    row.id,
+    row.source,
+    `${row.start.toISOString()} -> ${row.resetAt.toISOString()}`,
+    `${row.calls} call(s)`
+  ].join(" | ");
 }
 
 function addStatRangeOptions(command: Command) {

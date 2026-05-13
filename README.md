@@ -39,7 +39,9 @@ codex-helper stat --group-by hour
 codex-helper stat --group-by week
 codex-helper stat --group-by month
 codex-helper stat --group-by model
+codex-helper stat --group-by model --reasoning-effort
 codex-helper stat --group-by cwd
+codex-helper stat --all --group-by model --format csv
 codex-helper stat --today
 codex-helper stat --month --format markdown
 codex-helper stat --last 30d --format json
@@ -51,6 +53,16 @@ codex-helper stat sessions --sort time --limit 10
 codex-helper stat sessions session-a --last 30d
 codex-helper stat sessions session-a --format json --limit 20
 codex-helper stat sessions --last 30d --format json
+codex-helper cycle add "2026-05-01 08:00" --note "initial weekly cycle"
+codex-helper cycle add "2026-05-01 08:00" "2026-05-09 10:30"
+codex-helper cycle list
+codex-helper cycle remove <anchor-id>
+codex-helper cycle current
+codex-helper cycle history
+codex-helper cycle history <cycle-id>
+codex-helper cycle history --select
+codex-helper cycle history --start 2026-05-01 --end 2026-05-31 --format json
+codex-helper cycle history --estimate-before-anchor
 ```
 
 ### Auth
@@ -73,8 +85,8 @@ email, user ID, plan, and organizations. It never prints the raw ID token.
 
 `auth save` persists the entire current `auth.json` under the profile store
 using the account ID as the unique key. By default the store is
-`<auth-file-dir>/auth-profiles`, so `--auth-file` keeps profiles next to that
-specific file; without `--auth-file`, the store is `$CODEX_HOME/auth-profiles`.
+`$CODEX_HOME/codex-helper/auth-profiles`; `--auth-file` only changes which
+auth file is read. Use `--store-dir` to choose a different profile store.
 `auth list` only shows the current profile and readable persisted profiles. If a
 persisted profile cannot be decoded, it is listed under skipped profiles instead
 of failing the whole command. `auth select` switches to a persisted profile; in
@@ -117,6 +129,89 @@ Views:
 | `codex-helper stat sessions` | Top sessions by credits by default. |
 | `codex-helper stat sessions <session-id>` | Event-level token usage timeline for one session. |
 
+### Weekly Limit Cycles
+
+Syntax:
+
+```bash
+codex-helper cycle add/list/remove
+codex-helper cycle current
+codex-helper cycle history
+codex-helper cycle history <cycle-id>
+codex-helper cycle history --select
+```
+
+`cycle` estimates Codex weekly-limit usage from local `token_count` events
+and user-provided anchors. It does not call Codex or OpenAI services and it does
+not implement 5-hour limit windows.
+
+A weekly anchor is the first real use that starts a weekly limit cycle. The
+cycle resets 168 hours later. If no local usage occurs after that reset, no new
+cycle is opened yet; the next local usage event after reset becomes the next
+cycle start.
+
+Anchors are stored by account in
+`$CODEX_HOME/codex-helper/stat-cycles.json`. The account is resolved from
+`--account-id`, then the current `auth.json` account, then the fallback
+`default` account bucket. Use `--cycle-file <path>` for an isolated store.
+
+Examples:
+
+```bash
+codex-helper cycle add "2026-05-01 08:00" --note "known reset use"
+codex-helper cycle add "2026-05-01 08:00" "2026-05-09 10:30"
+codex-helper cycle list
+codex-helper cycle current
+codex-helper cycle history --last 30d
+codex-helper cycle history cyc_20260509T080000000Z --last 30d
+codex-helper cycle history --select --last 30d
+codex-helper cycle history --estimate-before-anchor --format json
+```
+
+`cycle add` accepts one or more times. Quote values that contain spaces, or
+pass common `YYYY-MM-DD HH:mm` values as unquoted date/time pairs. Time input
+with an explicit offset, such as `2026-05-01T08:00:00+08:00`, is parsed using
+that offset. Time input without an offset, such as `2026-05-01 08:00`, is
+interpreted in the current system time zone. Stored anchors keep the original
+input and save the instant as UTC ISO.
+
+History reports include a stable cycle ID in each row. Manual cycles use the
+anchor ID, derived cycles use `cyc_<UTC-start>`, and estimated cycles use
+`est_<UTC-start>`. Pass one of those IDs to `cycle history <cycle-id>` to show
+current-style details for that cycle, including by-day and by-model breakdowns.
+Use `cycle history --select` in an interactive terminal to choose from matching
+history rows.
+
+Cycle reports mark each row with a source:
+
+| Source | Meaning |
+| --- | --- |
+| `manual` | Cycle start came from a user anchor. |
+| `derived` | Cycle start came from the first local usage event after reset. |
+| `estimated` | Pre-anchor history was included only because `--estimate-before-anchor` was supplied. |
+| `unanchored` | No usable anchor exists for the selected account. |
+
+By default, history before the earliest anchor is not reported as exact. Use
+`--estimate-before-anchor` only when you want fixed 168-hour pre-anchor buckets
+clearly labeled as `estimated`. `current` table output shows the current cycle
+summary, a by-day breakdown, and a by-model breakdown; JSON output includes the
+same data as `current`, `byDay`, and `byModel`. `current` and `history` read
+session JSONL files from the normal stat sessions directory and enable full
+JSONL file scanning so long sessions are filtered by event time instead of
+rollout filename time.
+
+Cycle options:
+
+| Option | Behavior |
+| --- | --- |
+| `--account-id <id>` | Use a specific cycle account bucket. |
+| `--cycle-file <path>` | Use a specific anchor store file. |
+| `--auth-file <path>` | Use a specific `auth.json` when resolving the account. |
+| `--codex-home <path>` | Resolve `auth.json`, sessions, and the default cycle file under this Codex home. |
+| `--sessions-dir <path>` | Use a specific sessions directory for `current` and `history`. |
+| `--select` | Interactively select a history cycle to show in detail. |
+| `--estimate-before-anchor` | Include pre-anchor estimated history rows. |
+
 Time range options:
 
 | Option | Behavior |
@@ -127,11 +222,13 @@ Time range options:
 | `--yesterday` | Previous local day. |
 | `--month` | Current local calendar month through now. |
 | `--last <duration>` | Recent duration such as `12h`, `7d`, `2w`, or `1mo`. |
+| `--all` | Scan and include all session usage records without date pruning. |
 
 When `--group-by` is not supplied, `stat` chooses a default from the resolved
 time range: ranges up to 48 hours use `hour`, ranges up to 31 days use `day`,
 ranges up to six calendar months use `week`, and longer ranges use `month`.
-`--month` remains grouped by `day` by default.
+`--month` remains grouped by `day` by default, while `--all` defaults to
+`month`.
 
 Aggregation and shaping options:
 
@@ -141,6 +238,11 @@ Aggregation and shaping options:
 | `--sort <sort>` | Sort rows by `time`, `tokens`, `credits`, `calls`, or `sessions`. |
 | `--limit <n>` | Cap output rows. For `sessions <session-id>`, this caps displayed events while totals still cover the whole matched session. |
 | `--top <n>` | Session-list row count. When both `--top` and `--limit` are supplied to `stat sessions`, `--top` wins. |
+| `--reasoning-effort` | When grouping by `model`, append Codex reasoning effort to the model key. |
+
+When `--reasoning-effort` is combined with `--group-by model`, Codex reasoning
+effort is appended when present, for example `gpt-5.5-high` or
+`gpt-5.5-xhigh`. Pricing still uses the base model name.
 
 Output options:
 
@@ -178,6 +280,7 @@ JSON output includes the same information under `unpricedModels`.
 - tsdown for ESM builds and declaration output.
 - Vitest for unit tests.
 - Commander for CLI parsing.
+- Inquirer for interactive CLI prompts.
 - picocolors and ora for richer terminal output.
 
 ## Package Layout

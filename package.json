@@ -1,6 +1,6 @@
 {
   "name": "codex-helper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A command line helper for Codex workflows.",
   "type": "module",
   "main": "./dist/index.mjs",
@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "commander": "^14.0.3",
+    "inquirer": "^13.4.3",
     "ora": "^9.4.0",
     "picocolors": "^1.1.1"
   },
