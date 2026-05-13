@@ -264,6 +264,50 @@ describe("stats", () => {
     });
 
     expect(byCwd.rows.map((row) => row.key)).toEqual(["/repo/alpha", "/repo/beta"]);
+
+    const accountHistory = {
+      defaultAccountId: "account-a",
+      switches: [
+        {
+          timestamp: new Date("2026-05-11T10:30:00.000Z"),
+          fromAccountId: "account-a",
+          toAccountId: "account-b"
+        }
+      ]
+    };
+    const accountRecords = await readCodexUsageRecords({
+      sessionsDir,
+      start,
+      end,
+      accountHistory
+    });
+    const byAccount = buildUsageStats(accountRecords, {
+      start,
+      end,
+      groupBy: "account",
+      sessionsDir
+    });
+    const accountB = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "account",
+      sessionsDir,
+      accountHistory,
+      accountId: "account-b"
+    });
+
+    expect(accountRecords.map((record) => record.accountId)).toEqual([
+      "account-a",
+      "account-a",
+      "account-b"
+    ]);
+    expect(byAccount.rows.map((row) => `${row.key}:${row.calls}`)).toEqual([
+      "account-a:2",
+      "account-b:1"
+    ]);
+    expect(accountB.rows.map((row) => row.key)).toEqual(["account-b"]);
+    expect(accountB.totals.calls).toBe(1);
+    expect(accountB.diagnostics?.skippedEvents.accountMismatch).toBe(2);
   });
 
   it("reads all usage records when --all disables date pruning", async () => {

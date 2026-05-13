@@ -41,6 +41,8 @@ codex-helper stat --group-by month
 codex-helper stat --group-by model
 codex-helper stat --group-by model --reasoning-effort
 codex-helper stat --group-by cwd
+codex-helper stat --group-by account
+codex-helper stat --account-id <account-id>
 codex-helper stat --all --group-by model --format csv
 codex-helper stat --today
 codex-helper stat --month --format markdown
@@ -92,7 +94,12 @@ persisted profile cannot be decoded, it is listed under skipped profiles instead
 of failing the whole command. `auth select` switches to a persisted profile; in
 an interactive terminal it uses an Up/Down/Enter selection list, saves the
 current `auth.json` first, then replaces `auth.json` with the selected persisted
-content. `auth remove` shows an interactive multi-select list where Space
+content. The first switch also initializes
+`$CODEX_HOME/codex-helper/auth-account-history.json` from the current
+`auth.json`, then records each successful `auth select` timestamp so usage can be
+attributed back to the active account. `--store-dir` only moves saved auth
+profiles; use `--account-history-file` if the account history itself should live
+somewhere else. `auth remove` shows an interactive multi-select list where Space
 toggles entries and Enter confirms the selection, then asks for a second
 confirmation before deleting persisted copies.
 
@@ -103,6 +110,7 @@ Options:
 | `--auth-file <path>` | Use a specific `auth.json` file. |
 | `--codex-home <path>` | Read `<path>/auth.json`. Ignored when `--auth-file` is supplied. |
 | `--store-dir <path>` | Use a specific auth profile store directory for `save`, `list`, `select`, and `remove`. |
+| `--account-history-file <path>` | Use a specific auth account history file for `select`. |
 | `--json` | Include the decoded JWT header and claims as JSON. |
 | `--account-id <id>` | Select or remove a specific persisted profile. |
 | `--yes` | Skip confirmation when removing with `--account-id`. |
@@ -120,6 +128,9 @@ Use `--codex-home` or `--sessions-dir` to point it at another Codex data
 directory. The scanner prunes date-shaped `YYYY/MM/DD` directories and rollout
 filenames by the requested range, then reads matching files with bounded
 concurrency.
+Use `--group-by account` or `--account-id <id>` to initialize/read
+`auth-account-history.json` and attribute `token_count` events by the account
+active at each event timestamp.
 
 Views:
 
@@ -153,7 +164,9 @@ cycle start.
 Anchors are stored by account in
 `$CODEX_HOME/codex-helper/stat-cycles.json`. The account is resolved from
 `--account-id`, then the current `auth.json` account, then the fallback
-`default` account bucket. Use `--cycle-file <path>` for an isolated store.
+`default` account bucket. Cycle usage reads `auth-account-history.json` when
+available so usage from other accounts is not mixed into the selected account.
+Use `--cycle-file <path>` for an isolated store.
 
 Examples:
 

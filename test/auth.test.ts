@@ -5,13 +5,16 @@ import { describe, expect, it } from "vitest";
 import {
   buildCodexAuthStatus,
   decodeJwt,
+  ensureCodexAuthAccountHistory,
   formatAuthStatus,
   listCodexAuthProfiles,
   removeCodexAuthProfile,
+  resolveCodexAuthAccountHistoryFile,
   resolveCodexAuthProfileStoreDir,
   resolveCodexHelperDir,
   saveCurrentCodexAuthProfile,
   switchCodexAuthProfile,
+  toAuthAccountUsageHistory,
   type CodexAuthJson,
   type JsonObject
 } from "../src/index.js";
@@ -202,11 +205,20 @@ describe("auth", () => {
       const authFile = join(tempDir, "fixture-home", "auth.json");
       const codexHome = join(tempDir, "codex-home");
       const storeDir = join(codexHome, "codex-helper", "auth-profiles");
+      const accountHistoryFile = join(codexHome, "codex-helper", "auth-account-history.json");
+      const customAccountHistoryFile = join(tempDir, "custom-history.json");
 
       expect(resolveCodexHelperDir({ codexHome })).toBe(join(codexHome, "codex-helper"));
       expect(resolveCodexAuthProfileStoreDir({ authFile, codexHome })).toBe(storeDir);
       expect(resolveCodexAuthProfileStoreDir({ storeDir: join(tempDir, "custom"), codexHome })).toBe(
         join(tempDir, "custom")
+      );
+      expect(resolveCodexAuthAccountHistoryFile({ authFile, codexHome })).toBe(accountHistoryFile);
+      expect(resolveCodexAuthAccountHistoryFile({ storeDir: join(tempDir, "custom"), codexHome })).toBe(
+        accountHistoryFile
+      );
+      expect(resolveCodexAuthAccountHistoryFile({ accountHistoryFile: customAccountHistoryFile, codexHome })).toBe(
+        customAccountHistoryFile
       );
     } finally {
       await rm(tempDir, { force: true, recursive: true });
@@ -236,7 +248,9 @@ describe("auth", () => {
   it("switches to a persisted profile after saving the current auth.json", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-auth-switch-"));
     const authFile = join(tempDir, "auth.json");
+    const codexHome = join(tempDir, "codex-home");
     const storeDir = join(tempDir, "auth-profiles");
+    const accountHistoryFile = join(codexHome, "codex-helper", "auth-account-history.json");
     const currentContent = createAuthContent("account-a", "User A", "a@example.test", "plus");
     const selectedContent = createAuthContent("account-b", "User B", "b@example.test", "pro");
 
@@ -245,12 +259,88 @@ describe("auth", () => {
       await saveCurrentCodexAuthProfile({ authFile, storeDir });
       await writeFile(authFile, currentContent);
 
-      const report = await switchCodexAuthProfile("account-b", { authFile, storeDir });
+      const report = await switchCodexAuthProfile("account-b", { authFile, storeDir, codexHome });
+      const history = JSON.parse(
+        await readFile(accountHistoryFile, "utf8")
+      ) as Record<string, unknown>;
 
       expect(report.savedCurrent.accountId).toBe("account-a");
       expect(report.activated.accountId).toBe("account-b");
+      expect(report.accountHistoryFile).toBe(accountHistoryFile);
       expect(await readFile(authFile, "utf8")).toBe(selectedContent);
       expect(await readFile(join(storeDir, "account-a.json"), "utf8")).toBe(currentContent);
+      expect(history).toMatchObject({
+        version: 1,
+        defaultAccount: {
+          accountId: "account-a",
+          email: "a@example.test",
+          planType: "plus"
+        },
+        switches: [
+          {
+            fromAccountId: "account-a",
+            toAccountId: "account-b",
+            source: "auth select"
+          }
+        ]
+      });
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it("initializes auth account history from the current auth.json", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-auth-history-"));
+    const authFile = join(tempDir, "auth.json");
+    const accountHistoryFile = join(tempDir, "auth-account-history.json");
+
+    try {
+      await writeFile(authFile, createAuthContent("account-a", "User A", "a@example.test", "plus"));
+
+      const report = await ensureCodexAuthAccountHistory(
+        { authFile, accountHistoryFile },
+        new Date("2026-05-13T00:00:00.000Z")
+      );
+      const usageHistory = toAuthAccountUsageHistory(report.store);
+
+      expect(resolveCodexAuthAccountHistoryFile({ accountHistoryFile })).toBe(accountHistoryFile);
+      expect(report.initializedDefault).toBe(true);
+      expect(report.store.defaultAccount).toMatchObject({
+        accountId: "account-a",
+        observedAt: "2026-05-13T00:00:00.000Z",
+        email: "a@example.test",
+        planType: "plus"
+      });
+      expect(usageHistory).toEqual({
+        defaultAccountId: "account-a",
+        switches: []
+      });
+      expect(await readFile(accountHistoryFile, "utf8")).toContain("\"defaultAccount\"");
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it("does not switch auth.json when account history cannot be parsed", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-auth-switch-history-error-"));
+    const authFile = join(tempDir, "auth.json");
+    const storeDir = join(tempDir, "auth-profiles");
+    const accountHistoryFile = join(tempDir, "auth-account-history.json");
+    const currentContent = createAuthContent("account-a", "User A", "a@example.test", "plus");
+    const selectedContent = createAuthContent("account-b", "User B", "b@example.test", "pro");
+
+    try {
+      await writeFile(authFile, selectedContent);
+      await saveCurrentCodexAuthProfile({ authFile, storeDir });
+      await writeFile(authFile, currentContent);
+      await writeFile(accountHistoryFile, "{not-json");
+
+      await expect(
+        switchCodexAuthProfile("account-b", { authFile, storeDir, accountHistoryFile })
+      ).rejects.toThrow(`Failed to parse ${accountHistoryFile}`);
+
+      expect(await readFile(authFile, "utf8")).toBe(currentContent);
+      expect(await readFile(accountHistoryFile, "utf8")).toBe("{not-json");
     } finally {
       await rm(tempDir, { force: true, recursive: true });
     }

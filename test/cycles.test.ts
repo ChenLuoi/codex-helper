@@ -348,10 +348,48 @@ describe("weekly cycle anchors", () => {
       "2026-05-09T08:00:00.000Z",
       "2026-05-10T00:00:00.000Z"
     ]);
+    expect(history.rows.map((row) => row.resetAt.toISOString())).toEqual([
+      "2026-05-08T00:00:00.000Z",
+      "2026-05-10T00:00:00.000Z",
+      "2026-05-17T00:00:00.000Z"
+    ]);
     expect(history.rows.map((row) => row.calls)).toEqual([1, 1, 1]);
     expect(history.rows[1]?.usage.totalTokens).toBe(20);
     expect(history.rows[2]?.usage.totalTokens).toBe(30);
     expect(history.rows[2]?.anchorId).toBe("anchor-may-10");
+  });
+
+  it("uses a manual anchor within 168 hours as the previous cycle reset time", () => {
+    const anchors = [
+      anchor("anchor-may-05", "2026-05-04T23:30:00.000Z", "2026-05-04T23:30:00Z"),
+      anchor("anchor-may-19", "2026-05-18T23:35:00.000Z", "2026-05-18T23:35:00Z")
+    ];
+    const history = buildWeeklyCycleHistoryReport({
+      anchors,
+      records: [
+        record("2026-05-05T00:00:00.000Z", { sessionId: "session-a", inputTokens: 10 }),
+        record("2026-05-11T23:36:45.142Z", { sessionId: "session-b", inputTokens: 20 })
+      ],
+      now: new Date("2026-05-19T00:00:00.000Z")
+    });
+
+    expect(history.rows.map((row) => row.source)).toEqual(["manual", "derived", "manual"]);
+    expect(history.rows.map((row) => row.start.toISOString())).toEqual([
+      "2026-05-04T23:30:00.000Z",
+      "2026-05-11T23:36:45.142Z",
+      "2026-05-18T23:35:00.000Z"
+    ]);
+    expect(history.rows.map((row) => row.resetAt.toISOString())).toEqual([
+      "2026-05-11T23:30:00.000Z",
+      "2026-05-18T23:35:00.000Z",
+      "2026-05-25T23:35:00.000Z"
+    ]);
+    expect(history.rows.map((row) => row.exclusiveEnd.toISOString())).toEqual([
+      "2026-05-11T23:30:00.000Z",
+      "2026-05-18T23:35:00.000Z",
+      "2026-05-25T23:35:00.000Z"
+    ]);
+    expect(history.rows.map((row) => row.calls)).toEqual([1, 1, 0]);
   });
 
   it("keeps unpriced model breakdowns in cycle rows and totals", () => {
@@ -466,7 +504,7 @@ describe("weekly cycle anchors", () => {
     const markdown = formatWeeklyCycleAnchorList(report, "markdown");
 
     expect(table).toContain("Codex weekly cycle anchors");
-    expect(table).toContain("Account: account-a (explicit)");
+    expect(table).toContain("Account: account-a");
     expect(table).toContain("anchor-may-01");
     expect(table).toContain("2026-05-01");
     expect(json).toMatchObject({
@@ -504,6 +542,7 @@ describe("weekly cycle anchors", () => {
     });
     const context = {
       accountId: "account-a",
+      accountLabel: "a@example.test(account-a)",
       accountSource: "chatgpt_account_id" as const,
       cycleFile: "/tmp/stat-cycles.json"
     };
@@ -512,7 +551,7 @@ describe("weekly cycle anchors", () => {
 
     expect(table).toContain("Codex weekly cycle current");
     expect(table).toContain("Status: active");
-    expect(table).toContain("Account: account-a (chatgpt_account_id)");
+    expect(table).toContain("Account: a@example.test(account-a)");
     expect(table).toContain("Summary:");
     expect(table).toContain("By day:");
     expect(table).toContain("By model:");
@@ -524,6 +563,7 @@ describe("weekly cycle anchors", () => {
     expect(table).toContain("Diagnostics:");
     expect(json).toMatchObject({
       accountId: "account-a",
+      accountLabel: "a@example.test(account-a)",
       accountSource: "chatgpt_account_id",
       cycleFile: "/tmp/stat-cycles.json",
       status: "active",
@@ -590,6 +630,7 @@ describe("weekly cycle anchors", () => {
     });
     const context = {
       accountId: "account-a",
+      accountLabel: "a@example.test(account-a)",
       accountSource: "explicit" as const,
       cycleFile: "/tmp/stat-cycles.json"
     };
@@ -644,6 +685,7 @@ describe("weekly cycle anchors", () => {
     });
     const context = {
       accountId: "account-a",
+      accountLabel: "a@example.test(account-a)",
       accountSource: "explicit" as const,
       cycleFile: "/tmp/stat-cycles.json"
     };
@@ -653,11 +695,13 @@ describe("weekly cycle anchors", () => {
     const markdown = formatWeeklyCycleHistory(report, "markdown", context);
 
     expect(table).toContain("Codex weekly cycle history");
+    expect(table).toContain("Account: a@example.test(account-a)");
     expect(table).toContain("manual");
     expect(table).toContain("derived");
     expect(table).toContain("Total");
     expect(json).toMatchObject({
       accountId: "account-a",
+      accountLabel: "a@example.test(account-a)",
       accountSource: "explicit",
       cycleFile: "/tmp/stat-cycles.json",
       status: "ok",

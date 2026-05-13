@@ -240,6 +240,7 @@ export type WeeklyCycleDetailReport = {
 
 export type WeeklyCycleReportContext = {
   accountId?: string;
+  accountLabel?: string;
   accountSource?: WeeklyCycleAccountSource;
   cycleFile?: string;
 };
@@ -671,15 +672,17 @@ export function findWeeklyCycleHistoryRow(report: WeeklyCycleHistoryReport, cycl
 
 export function formatWeeklyCycleAnchorList(
   report: WeeklyCycleAnchorListReport,
-  format: StatFormat = "table"
+  format: StatFormat = "table",
+  context: Pick<WeeklyCycleReportContext, "accountLabel"> = {}
 ) {
   if (format === "json") {
-    return `${JSON.stringify(toWeeklyCycleAnchorListJson(report), null, 2)}\n`;
+    return `${JSON.stringify(toWeeklyCycleAnchorListJson(report, context), null, 2)}\n`;
   }
 
+  const accountDisplay = context.accountLabel ?? report.accountId;
   const rows = [
     anchorHeaders(),
-    ...report.anchors.map((anchor) => anchorRow(anchor, report.accountId))
+    ...report.anchors.map((anchor) => anchorRow(anchor, accountDisplay))
   ];
 
   if (format === "csv") {
@@ -692,7 +695,7 @@ export function formatWeeklyCycleAnchorList(
 
   const lines = [
     "Codex weekly cycle anchors",
-    `Account: ${report.accountId} (${report.accountSource})`,
+    `Account: ${accountDisplay}`,
     `Cycle file: ${report.cycleFile}`,
     ""
   ];
@@ -841,9 +844,13 @@ export function formatWeeklyCycleHistory(
   return lines.join("\n");
 }
 
-export function toWeeklyCycleAnchorListJson(report: WeeklyCycleAnchorListReport) {
+export function toWeeklyCycleAnchorListJson(
+  report: WeeklyCycleAnchorListReport,
+  context: Pick<WeeklyCycleReportContext, "accountLabel"> = {}
+) {
   return {
     accountId: report.accountId,
+    accountLabel: context.accountLabel,
     accountSource: report.accountSource,
     cycleFile: report.cycleFile,
     periodHours: WEEKLY_CYCLE_PERIOD_HOURS,
@@ -1102,9 +1109,12 @@ function deriveAnchoredWeeklyCycleWindows(
     let anchorId: string | undefined = anchor.id;
 
     while (start <= until) {
-      const resetAt = addWeeklyCyclePeriod(start);
-      const exclusiveEnd =
-        nextAnchor === undefined || nextAnchor.atDate < resetAt ? nextAnchor?.atDate ?? resetAt : resetAt;
+      const calculatedResetAt = addWeeklyCyclePeriod(start);
+      const resetAt =
+        nextAnchor !== undefined && nextAnchor.atDate <= calculatedResetAt
+          ? nextAnchor.atDate
+          : calculatedResetAt;
+      const exclusiveEnd = resetAt;
 
       windows.push({
         start,
@@ -1592,7 +1602,7 @@ function formatContextLines(context: WeeklyCycleReportContext) {
   const lines: string[] = [];
 
   if (context.accountId !== undefined) {
-    lines.push(`Account: ${context.accountId}${formatAccountSource(context.accountSource)}`);
+    lines.push(`Account: ${context.accountLabel ?? context.accountId}`);
   }
 
   if (context.cycleFile !== undefined) {
@@ -1600,10 +1610,6 @@ function formatContextLines(context: WeeklyCycleReportContext) {
   }
 
   return lines;
-}
-
-function formatAccountSource(source: WeeklyCycleAccountSource | undefined) {
-  return source === undefined ? "" : ` (${source})`;
 }
 
 function appendCycleDiagnostics(lines: string[], diagnostics: WeeklyCycleDiagnostics) {

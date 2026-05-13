@@ -116,7 +116,9 @@ describe("cli", () => {
   it("selects a persisted auth profile by account id", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-auth-select-"));
     const authFile = join(tempDir, "auth.json");
+    const codexHome = join(tempDir, "codex-home");
     const storeDir = join(tempDir, "auth-profiles");
+    const accountHistoryFile = join(codexHome, "codex-helper", "auth-account-history.json");
     const currentContent = createAuthContent("account-a", "User A", "a@example.test", "plus");
     const selectedContent = createAuthContent("account-b", "User B", "b@example.test", "pro");
     const output = new MemoryStream();
@@ -136,6 +138,8 @@ describe("cli", () => {
         authFile,
         "--store-dir",
         storeDir,
+        "--codex-home",
+        codexHome,
         "--account-id",
         "account-b"
       ]);
@@ -148,6 +152,9 @@ describe("cli", () => {
       );
       expect(await readFile(authFile, "utf8")).toBe(selectedContent);
       expect(await readFile(join(storeDir, "account-a.json"), "utf8")).toBe(currentContent);
+      expect(await readFile(accountHistoryFile, "utf8")).toContain(
+        "\"toAccountId\": \"account-b\""
+      );
     } finally {
       await rm(tempDir, { force: true, recursive: true });
     }
@@ -168,6 +175,7 @@ describe("cli", () => {
     expect(helpText).toContain("--full-scan");
     expect(helpText).toContain("--all");
     expect(helpText).toContain("--reasoning-effort");
+    expect(helpText).toContain("--account-id");
     expect(helpText).toContain("--verbose");
     expect(helpText).toContain("--top");
     expect(helpText).not.toContain("cycle");
@@ -216,7 +224,7 @@ describe("cli", () => {
       expect(added).toContain("Added 2 weekly cycle anchors:");
       expect(added).toContain("anc_20260501T000000000Z");
       expect(added).toContain("anc_20260508T000000000Z");
-      expect(added).toContain("Account: account-a (explicit)");
+      expect(added).toContain("Account: account-a");
       expect(added).toContain(`Cycle file: ${cycleFile}`);
 
       const listed = await runCli([
@@ -280,19 +288,23 @@ describe("cli", () => {
   it("prints a clear current-cycle message when no anchor is configured", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-cycle-current-"));
     const cycleFile = join(tempDir, "stat-cycles.json");
+    const authFile = join(tempDir, "auth.json");
 
     try {
+      await writeFile(authFile, createAuthContent("account-a", "User A", "a@example.test", "plus"));
+
       const output = await runCli([
         "cycle",
         "current",
         "--cycle-file",
         cycleFile,
-        "--account-id",
-        "account-a"
+        "--auth-file",
+        authFile
       ]);
 
       expect(output).toContain("Codex weekly cycle current");
       expect(output).toContain("Status: unanchored");
+      expect(output).toContain("Account: a@example.test(account-a)");
       expect(output).toContain("No weekly cycle anchors configured.");
     } finally {
       await rm(tempDir, { force: true, recursive: true });
@@ -303,8 +315,10 @@ describe("cli", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-cycle-history-"));
     const cycleFile = join(tempDir, "stat-cycles.json");
     const sessionsDir = join(tempDir, "sessions");
+    const authFile = join(tempDir, "auth.json");
 
     try {
+      await writeFile(authFile, createAuthContent("account-a", "User A", "a@example.test", "plus"));
       await writeCycleSession(sessionsDir, "rollout-2026-05-01T00-00-00-cycle-session.jsonl", [
         { timestamp: "2026-05-01T01:00:00.000Z", inputTokens: 100 },
         { timestamp: "2026-05-09T08:00:00.000Z", inputTokens: 50 }
@@ -326,6 +340,8 @@ describe("cli", () => {
         cycleFile,
         "--account-id",
         "account-a",
+        "--auth-file",
+        authFile,
         "--sessions-dir",
         sessionsDir,
         "--start",
@@ -335,11 +351,13 @@ describe("cli", () => {
         "--json"
       ]);
       const json = JSON.parse(output) as {
+        accountLabel?: string;
         rows: Array<{ id: string; start: string; source: string; calls: number }>;
         totals: { calls: number; usage: { totalTokens: number } };
         diagnostics: { usageDiagnostics?: { scanAllFiles: boolean; includedUsageEvents: number } };
       };
 
+      expect(json.accountLabel).toBe("a@example.test(account-a)");
       expect(json.rows.map((row) => row.id)).toEqual([
         "anc_20260501T000000000Z",
         "cyc_20260509T080000000Z"
@@ -364,6 +382,8 @@ describe("cli", () => {
         cycleFile,
         "--account-id",
         "account-a",
+        "--auth-file",
+        authFile,
         "--sessions-dir",
         sessionsDir,
         "--start",
@@ -373,6 +393,7 @@ describe("cli", () => {
       ]);
 
       expect(detail).toContain("Codex weekly cycle detail");
+      expect(detail).toContain("Account: a@example.test(account-a)");
       expect(detail).toContain("Cycle ID: cyc_20260509T080000000Z");
       expect(detail).toContain("By day:");
       expect(detail).toContain("By model:");
@@ -412,6 +433,56 @@ describe("cli", () => {
         scanAllFiles: true,
         readFiles: 1
       });
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it("defaults weekly cycle history to all usage instead of the last seven days", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-cycle-history-default-all-"));
+    const cycleFile = join(tempDir, "stat-cycles.json");
+    const sessionsDir = join(tempDir, "sessions");
+
+    try {
+      await writeCycleSession(sessionsDir, "rollout-2026-05-01T00-00-00-cycle-session.jsonl", [
+        { timestamp: "2026-05-01T01:00:00.000Z", inputTokens: 100 },
+        { timestamp: "2026-05-20T08:00:00.000Z", inputTokens: 50 }
+      ]);
+      await runCli([
+        "cycle",
+        "add",
+        "2026-05-01T00:00:00Z",
+        "--cycle-file",
+        cycleFile,
+        "--account-id",
+        "account-a"
+      ]);
+
+      const output = await runCli([
+        "cycle",
+        "history",
+        "--cycle-file",
+        cycleFile,
+        "--account-id",
+        "account-a",
+        "--sessions-dir",
+        sessionsDir,
+        "--json"
+      ]);
+      const json = JSON.parse(output) as {
+        start: string;
+        end: string;
+        totals: { calls: number; usage: { totalTokens: number } };
+        rows: Array<{ start: string; calls: number }>;
+      };
+
+      expect(new Date(json.start).getFullYear()).toBeLessThanOrEqual(1900);
+      expect(new Date(json.end).getFullYear()).toBe(9999);
+      expect(json.totals).toMatchObject({
+        calls: 2,
+        usage: { totalTokens: 150 }
+      });
+      expect(json.rows.map((row) => row.calls)).toEqual([1, 1]);
     } finally {
       await rm(tempDir, { force: true, recursive: true });
     }

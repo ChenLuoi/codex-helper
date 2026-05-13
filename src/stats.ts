@@ -6,7 +6,7 @@ import { createInterface } from "node:readline";
 import pc from "picocolors";
 import { calculateCreditCost, normalizeModelName } from "./pricing.js";
 
-export type StatGroupBy = "hour" | "day" | "week" | "month" | "model" | "cwd";
+export type StatGroupBy = "hour" | "day" | "week" | "month" | "model" | "cwd" | "account";
 export type StatFormat = "table" | "json" | "csv" | "markdown";
 export type StatSort = "time" | "tokens" | "credits" | "calls" | "sessions";
 
@@ -24,6 +24,7 @@ export type UsageRecord = {
   model: string;
   reasoningEffort?: string;
   cwd: string;
+  accountId?: string;
   filePath: string;
   usage: TokenUsage;
 };
@@ -42,9 +43,26 @@ export type UsageFileScanOptions = {
   scanAllFiles?: boolean;
 };
 
+export type UsageAccountSwitch = {
+  timestamp: Date;
+  fromAccountId?: string;
+  toAccountId: string;
+};
+
+export type UsageAccountHistory = {
+  defaultAccountId?: string;
+  switches: UsageAccountSwitch[];
+};
+
+export type UsageAccountOptions = {
+  accountHistory?: UsageAccountHistory;
+  accountId?: string;
+};
+
 export type StatOptions = StatRangeOptions & {
   groupBy: StatGroupBy;
   includeReasoningEffort: boolean;
+  accountId?: string;
 };
 
 export type RawStatOptions = {
@@ -62,6 +80,7 @@ export type RawStatOptions = {
   last?: string;
   sort?: string;
   limit?: string | number;
+  accountId?: string;
   verbose?: boolean;
   json?: boolean;
 };
@@ -195,6 +214,7 @@ export type UsageDiagnostics = {
     missingUsage: number;
     emptyUsage: number;
     outOfRange: number;
+    accountMismatch: number;
   };
   fileReadConcurrency: number;
 };
@@ -243,7 +263,8 @@ export function resolveStatOptions(raw: RawStatOptions = {}, now = new Date()): 
   return {
     ...rangeOptions,
     groupBy,
-    includeReasoningEffort: raw.reasoningEffort === true
+    includeReasoningEffort: raw.reasoningEffort === true,
+    accountId: normalizeOptionalAccountId(raw.accountId)
   };
 }
 
@@ -270,13 +291,17 @@ export function resolveStatRangeOptions(
 }
 
 export async function readCodexUsageRecords(
-  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> & UsageFileScanOptions
+  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> &
+    UsageFileScanOptions &
+    UsageAccountOptions
 ) {
   return (await readCodexUsageRecordsReport(options)).records;
 }
 
 export async function readCodexUsageRecordsReport(
-  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> & UsageFileScanOptions
+  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> &
+    UsageFileScanOptions &
+    UsageAccountOptions
 ): Promise<UsageRecordsReport> {
   const records: UsageRecord[] = [];
   const diagnostics = await processCodexUsageRecords(options, (record) => records.push(record));
@@ -292,8 +317,9 @@ export async function readCodexUsageRecordsReport(
 
 export async function readCodexUsageStats(
   options: Pick<StatOptions, "start" | "end" | "groupBy" | "sessionsDir"> &
-    Partial<Pick<StatOptions, "includeReasoningEffort" | "sortBy" | "limit">> &
-    UsageFileScanOptions
+    Partial<Pick<StatOptions, "includeReasoningEffort" | "sortBy" | "limit" | "accountId">> &
+    UsageFileScanOptions &
+    UsageAccountOptions
 ): Promise<UsageStatsReport> {
   const accumulator = createUsageStatsAccumulator(options);
   const diagnostics = await processCodexUsageRecords(options, (record) => accumulator.add(record));
@@ -304,7 +330,8 @@ export async function readCodexUsageStats(
 export async function readCodexUsageSessions(
   options: Pick<StatRangeOptions, "start" | "end" | "sessionsDir"> &
     Partial<Pick<StatRangeOptions, "sortBy" | "limit">> &
-    UsageFileScanOptions,
+    UsageFileScanOptions &
+    UsageAccountOptions,
   limit = 10
 ): Promise<UsageSessionsReport> {
   const accumulator = createUsageSessionsAccumulator(options, limit);
@@ -316,7 +343,8 @@ export async function readCodexUsageSessions(
 export async function readCodexUsageSessionDetail(
   options: Pick<StatRangeOptions, "start" | "end" | "sessionsDir"> &
     Partial<Pick<StatRangeOptions, "limit">> &
-    UsageFileScanOptions,
+    UsageFileScanOptions &
+    UsageAccountOptions,
   sessionId: string
 ): Promise<UsageSessionDetailReport> {
   const accumulator = createUsageSessionDetailAccumulator(options, sessionId);
@@ -1192,7 +1220,9 @@ function appendUsageNotes(
         diagnostics.skippedEvents.missingMetadata
       )}, missing usage ${formatInteger(diagnostics.skippedEvents.missingUsage)}, empty usage ${formatInteger(
         diagnostics.skippedEvents.emptyUsage
-      )}, out of range ${formatInteger(diagnostics.skippedEvents.outOfRange)}`
+      )}, out of range ${formatInteger(
+        diagnostics.skippedEvents.outOfRange
+      )}, account mismatch ${formatInteger(diagnostics.skippedEvents.accountMismatch)}`
     );
   } else if (shouldSuggestFullScan(report.diagnostics)) {
     const diagnostics = report.diagnostics;
@@ -1284,10 +1314,14 @@ export function toUsageSessionDetailJson(report: UsageSessionDetailReport) {
 }
 
 async function processCodexUsageRecords(
-  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> & UsageFileScanOptions,
+  options: Pick<StatRangeOptions, "sessionsDir" | "start" | "end"> &
+    UsageFileScanOptions &
+    UsageAccountOptions,
   onRecord: (record: UsageRecord) => void
 ) {
   const diagnostics = createUsageDiagnostics(DEFAULT_FILE_READ_CONCURRENCY, options.scanAllFiles === true);
+  const accountHistory = normalizeUsageAccountHistory(options.accountHistory);
+  const accountId = normalizeOptionalAccountId(options.accountId);
   let files = await listJsonlFiles(options.sessionsDir, options, [], diagnostics);
 
   if (options.scanAllFiles === true) {
@@ -1299,7 +1333,9 @@ async function processCodexUsageRecords(
   for (let index = 0; index < files.length; index += DEFAULT_FILE_READ_CONCURRENCY) {
     const batch = files.slice(index, index + DEFAULT_FILE_READ_CONCURRENCY);
     const results = await Promise.all(
-      batch.map((filePath) => readUsageRecordsFromFile(filePath, options.start, options.end))
+      batch.map((filePath) =>
+        readUsageRecordsFromFile(filePath, options.start, options.end, accountHistory, accountId)
+      )
     );
 
     for (const result of results) {
@@ -1313,7 +1349,13 @@ async function processCodexUsageRecords(
   return diagnostics;
 }
 
-async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date) {
+async function readUsageRecordsFromFile(
+  filePath: string,
+  start: Date,
+  end: Date,
+  accountHistory?: UsageAccountHistory,
+  accountIdFilter?: string
+) {
   const diagnostics = createUsageDiagnostics(0);
   const records: UsageRecord[] = [];
   const stream = createReadStream(filePath, { encoding: "utf8" });
@@ -1396,6 +1438,13 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
       continue;
     }
 
+    const accountId = resolveUsageAccountId(timestamp, accountHistory);
+
+    if (accountIdFilter !== undefined && accountId !== accountIdFilter) {
+      diagnostics.skippedEvents.accountMismatch += 1;
+      continue;
+    }
+
     diagnostics.includedUsageEvents += 1;
     records.push({
       timestamp,
@@ -1403,6 +1452,7 @@ async function readUsageRecordsFromFile(filePath: string, start: Date, end: Date
       model,
       reasoningEffort,
       cwd,
+      accountId,
       filePath,
       usage
     });
@@ -1461,6 +1511,50 @@ async function listJsonlFiles(
   }
 
   return files.sort();
+}
+
+function normalizeUsageAccountHistory(
+  history: UsageAccountHistory | undefined
+): UsageAccountHistory | undefined {
+  if (history === undefined) {
+    return undefined;
+  }
+
+  const switches = history.switches
+    .filter((entry) => !Number.isNaN(entry.timestamp.getTime()) && entry.toAccountId.trim().length > 0)
+    .map((entry) => ({
+      timestamp: entry.timestamp,
+      fromAccountId: normalizeOptionalAccountId(entry.fromAccountId),
+      toAccountId: entry.toAccountId.trim()
+    }))
+    .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
+
+  return {
+    defaultAccountId: normalizeOptionalAccountId(history.defaultAccountId),
+    switches
+  };
+}
+
+function resolveUsageAccountId(
+  timestamp: Date,
+  history: UsageAccountHistory | undefined
+): string | undefined {
+  if (history === undefined) {
+    return undefined;
+  }
+
+  let accountId = history.defaultAccountId;
+  const timestampMs = timestamp.getTime();
+
+  for (const entry of history.switches) {
+    if (entry.timestamp.getTime() > timestampMs) {
+      break;
+    }
+
+    accountId = entry.toAccountId;
+  }
+
+  return accountId;
 }
 
 async function prefilterFullScanFiles(
@@ -1566,7 +1660,8 @@ function createUsageDiagnostics(
       missingMetadata: 0,
       missingUsage: 0,
       emptyUsage: 0,
-      outOfRange: 0
+      outOfRange: 0,
+      accountMismatch: 0
     },
     fileReadConcurrency
   };
@@ -1582,6 +1677,7 @@ function mergeUsageDiagnostics(target: UsageDiagnostics, source: UsageDiagnostic
   target.skippedEvents.missingUsage += source.skippedEvents.missingUsage;
   target.skippedEvents.emptyUsage += source.skippedEvents.emptyUsage;
   target.skippedEvents.outOfRange += source.skippedEvents.outOfRange;
+  target.skippedEvents.accountMismatch += source.skippedEvents.accountMismatch;
 }
 
 function appendDatePathPart(parts: string[] | undefined, name: string) {
@@ -1710,12 +1806,15 @@ function parseGroupBy(value: string | undefined): StatGroupBy {
     value === "week" ||
     value === "month" ||
     value === "model" ||
-    value === "cwd"
+    value === "cwd" ||
+    value === "account"
   ) {
     return value;
   }
 
-  throw new Error("Invalid group-by value. Expected one of: hour, day, week, month, model, cwd.");
+  throw new Error(
+    "Invalid group-by value. Expected one of: hour, day, week, month, model, cwd, account."
+  );
 }
 
 function parseSort(value: string | undefined): StatSort | undefined {
@@ -1748,6 +1847,11 @@ function parseOptionalLimit(value: string | number | undefined, name: string) {
   }
 
   return limit;
+}
+
+function normalizeOptionalAccountId(value: string | undefined) {
+  const normalized = value?.trim();
+  return normalized === undefined || normalized.length === 0 ? undefined : normalized;
 }
 
 function resolveGroupBy(
@@ -1955,6 +2059,10 @@ function getGroupKey(
 
   if (groupBy === "cwd") {
     return record.cwd;
+  }
+
+  if (groupBy === "account") {
+    return record.accountId ?? "unknown";
   }
 
   if (groupBy === "week") {

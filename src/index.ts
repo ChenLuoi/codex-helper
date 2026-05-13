@@ -26,6 +26,7 @@ export type RawAuthStatusOptions = {
 
 export type RawAuthProfileOptions = RawAuthStatusOptions & {
   storeDir?: string;
+  accountHistoryFile?: string;
 };
 
 export type CodexAuthJson = JsonObject & {
@@ -121,6 +122,7 @@ export type AuthProfileSaveReport = {
 export type AuthProfileSwitchReport = {
   authFile: string;
   storeDir: string;
+  accountHistoryFile: string;
   savedCurrent: AuthProfileEntry;
   activated: AuthProfileEntry;
 };
@@ -128,6 +130,45 @@ export type AuthProfileSwitchReport = {
 export type AuthProfileRemoveReport = {
   storeDir: string;
   removed: AuthProfileEntry;
+};
+
+export type AuthAccountHistoryAccount = {
+  accountId: string;
+  observedAt: string;
+  source: "auth.json";
+  name?: string;
+  email?: string;
+  planType?: string;
+};
+
+export type AuthAccountSwitchEvent = {
+  timestamp: string;
+  fromAccountId: string;
+  toAccountId: string;
+  source: "auth select";
+};
+
+export type AuthAccountHistoryStore = {
+  version: 1;
+  defaultAccount?: AuthAccountHistoryAccount;
+  switches: AuthAccountSwitchEvent[];
+};
+
+export type AuthAccountHistoryReport = {
+  accountHistoryFile: string;
+  store: AuthAccountHistoryStore;
+  initializedDefault: boolean;
+};
+
+export type AuthAccountUsageSwitch = {
+  timestamp: Date;
+  fromAccountId: string;
+  toAccountId: string;
+};
+
+export type AuthAccountUsageHistory = {
+  defaultAccountId?: string;
+  switches: AuthAccountUsageSwitch[];
 };
 
 type ParsedAuthFile = {
@@ -138,6 +179,7 @@ type ParsedAuthFile = {
 };
 
 const OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
+const AUTH_ACCOUNT_HISTORY_STORE_VERSION = 1;
 
 export async function readCodexAuthStatus(
   options: RawAuthStatusOptions = {},
@@ -193,6 +235,80 @@ export function resolveCodexAuthProfileStoreDir(options: RawAuthProfileOptions =
   return join(resolveCodexHelperDir({ codexHome: options.codexHome }), "auth-profiles");
 }
 
+export function createEmptyCodexAuthAccountHistoryStore(): AuthAccountHistoryStore {
+  return {
+    version: AUTH_ACCOUNT_HISTORY_STORE_VERSION,
+    switches: []
+  };
+}
+
+export function resolveCodexAuthAccountHistoryFile(options: RawAuthProfileOptions = {}) {
+  if (options.accountHistoryFile !== undefined) {
+    return resolve(options.accountHistoryFile);
+  }
+
+  return join(resolveCodexHelperDir({ codexHome: options.codexHome }), "auth-account-history.json");
+}
+
+export async function readCodexAuthAccountHistory(
+  options: RawAuthProfileOptions = {}
+): Promise<AuthAccountHistoryReport> {
+  const accountHistoryFile = resolveCodexAuthAccountHistoryFile(options);
+
+  return {
+    accountHistoryFile,
+    store: await readCodexAuthAccountHistoryStore(accountHistoryFile),
+    initializedDefault: false
+  };
+}
+
+export async function ensureCodexAuthAccountHistory(
+  options: RawAuthProfileOptions = {},
+  now = new Date()
+): Promise<AuthAccountHistoryReport> {
+  const accountHistoryFile = resolveCodexAuthAccountHistoryFile(options);
+  const currentStore = await readCodexAuthAccountHistoryStore(accountHistoryFile);
+
+  if (currentStore.defaultAccount !== undefined) {
+    return {
+      accountHistoryFile,
+      store: currentStore,
+      initializedDefault: false
+    };
+  }
+
+  const current = await readCodexAuthFile(resolveCodexAuthFile(options), now);
+  const ensured = ensureAuthAccountHistoryDefault(currentStore, toAuthAccountHistoryAccount(current, now));
+
+  if (ensured.initializedDefault) {
+    await writeCodexAuthAccountHistoryStore(accountHistoryFile, ensured.store);
+  }
+
+  return {
+    accountHistoryFile,
+    store: ensured.store,
+    initializedDefault: ensured.initializedDefault
+  };
+}
+
+export function toAuthAccountUsageHistory(
+  store: AuthAccountHistoryStore
+): AuthAccountUsageHistory {
+  const normalized = normalizeAuthAccountHistoryStore(store);
+
+  return {
+    defaultAccountId: normalized.defaultAccount?.accountId,
+    switches: normalized.switches
+      .map((entry) => ({
+        timestamp: new Date(entry.timestamp),
+        fromAccountId: entry.fromAccountId,
+        toAccountId: entry.toAccountId
+      }))
+      .filter((entry) => !Number.isNaN(entry.timestamp.getTime()))
+      .sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime())
+  };
+}
+
 export async function saveCurrentCodexAuthProfile(
   options: RawAuthProfileOptions = {},
   now = new Date()
@@ -236,8 +352,10 @@ export async function switchCodexAuthProfile(
 ): Promise<AuthProfileSwitchReport> {
   const authFile = resolveCodexAuthFile(options);
   const storeDir = resolveCodexAuthProfileStoreDir(options);
+  const accountHistoryFile = resolveCodexAuthAccountHistoryFile(options);
   const profileFile = resolveCodexAuthProfileFile(storeDir, accountId);
   const selected = await readCodexAuthFile(profileFile, now);
+  const current = await readCodexAuthFile(authFile, now);
 
   if (selected.accountId !== accountId) {
     throw new Error(
@@ -245,14 +363,33 @@ export async function switchCodexAuthProfile(
     );
   }
 
-  const saved = await saveCurrentCodexAuthProfile(options, now);
-  await writeSensitiveFile(authFile, selected.content);
+  const savedProfileFile = resolveCodexAuthProfileFile(storeDir, current.accountId);
+  const savedCurrent = toAuthProfileEntry(current, "stored", savedProfileFile);
+  const activated = toAuthProfileEntry(selected, "current", undefined, authFile);
+  const previousHistoryContent = await readOptionalFileContent(accountHistoryFile);
+  const nextHistoryStore = await buildCodexAuthProfileSwitchHistory(
+    accountHistoryFile,
+    savedCurrent,
+    activated,
+    now
+  );
+
+  await writeSensitiveFile(savedProfileFile, current.content);
+  await writeCodexAuthAccountHistoryStore(accountHistoryFile, nextHistoryStore);
+
+  try {
+    await writeSensitiveFile(authFile, selected.content);
+  } catch (error) {
+    await restoreCodexAuthAccountHistoryFile(accountHistoryFile, previousHistoryContent).catch(() => undefined);
+    throw error;
+  }
 
   return {
     authFile,
     storeDir,
-    savedCurrent: saved.profile,
-    activated: toAuthProfileEntry(selected, "current", undefined, authFile)
+    accountHistoryFile,
+    savedCurrent,
+    activated
   };
 }
 
@@ -456,6 +593,120 @@ async function readStoredCodexAuthProfiles(storeDir: string, now: Date) {
   };
 }
 
+async function readCodexAuthAccountHistoryStore(filePath: string): Promise<AuthAccountHistoryStore> {
+  let content: string;
+
+  try {
+    content = await readFile(filePath, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return createEmptyCodexAuthAccountHistoryStore();
+    }
+
+    throw error;
+  }
+
+  return parseCodexAuthAccountHistoryStore(content, filePath);
+}
+
+async function writeCodexAuthAccountHistoryStore(filePath: string, store: AuthAccountHistoryStore) {
+  await writeSensitiveFile(filePath, `${JSON.stringify(normalizeAuthAccountHistoryStore(store), null, 2)}\n`);
+}
+
+async function buildCodexAuthProfileSwitchHistory(
+  accountHistoryFile: string,
+  savedCurrent: AuthProfileEntry,
+  activated: AuthProfileEntry,
+  now: Date
+): Promise<AuthAccountHistoryStore> {
+  const currentStore = await readCodexAuthAccountHistoryStore(accountHistoryFile);
+  const ensured = ensureAuthAccountHistoryDefault(
+    currentStore,
+    authProfileEntryToHistoryAccount(savedCurrent, now)
+  );
+  const switchEvent: AuthAccountSwitchEvent = {
+    timestamp: now.toISOString(),
+    fromAccountId: savedCurrent.accountId,
+    toAccountId: activated.accountId,
+    source: "auth select"
+  };
+
+  return {
+    ...ensured.store,
+    switches: [...ensured.store.switches, switchEvent]
+  };
+}
+
+async function readOptionalFileContent(filePath: string) {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+async function restoreCodexAuthAccountHistoryFile(filePath: string, content: string | undefined) {
+  if (content === undefined) {
+    await unlink(filePath).catch((error) => {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    });
+    return;
+  }
+
+  await writeSensitiveFile(filePath, content);
+}
+
+function ensureAuthAccountHistoryDefault(
+  store: AuthAccountHistoryStore,
+  account: AuthAccountHistoryAccount
+) {
+  const normalized = normalizeAuthAccountHistoryStore(store);
+
+  if (normalized.defaultAccount !== undefined) {
+    return {
+      store: normalized,
+      initializedDefault: false
+    };
+  }
+
+  return {
+    store: {
+      ...normalized,
+      defaultAccount: account
+    },
+    initializedDefault: true
+  };
+}
+
+function toAuthAccountHistoryAccount(parsed: ParsedAuthFile, now: Date): AuthAccountHistoryAccount {
+  return authSummaryToHistoryAccount(parsed.accountId, parsed.report.summary, now);
+}
+
+function authProfileEntryToHistoryAccount(entry: AuthProfileEntry, now: Date): AuthAccountHistoryAccount {
+  return authSummaryToHistoryAccount(entry.accountId, entry.summary, now);
+}
+
+function authSummaryToHistoryAccount(
+  accountId: string,
+  summary: AuthStatusSummary,
+  now: Date
+): AuthAccountHistoryAccount {
+  return compactUndefined({
+    accountId,
+    observedAt: now.toISOString(),
+    source: "auth.json" as const,
+    name: summary.name,
+    email: summary.email,
+    planType: summary.planType
+  });
+}
+
 function toAuthProfileEntry(
   parsed: ParsedAuthFile,
   source: AuthProfileSource,
@@ -483,6 +734,161 @@ function getAuthAccountId(report: AuthStatusReport) {
 
 function resolveCodexAuthProfileFile(storeDir: string, accountId: string) {
   return join(storeDir, `${encodeURIComponent(accountId)}.json`);
+}
+
+function parseCodexAuthAccountHistoryStore(
+  content: string,
+  filePath: string
+): AuthAccountHistoryStore {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(content);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse ${filePath}: ${detail}`);
+  }
+
+  if (!isJsonObject(parsed)) {
+    throw new Error(`Expected ${filePath} to contain an auth account history object.`);
+  }
+
+  if (parsed.version !== AUTH_ACCOUNT_HISTORY_STORE_VERSION) {
+    throw new Error(`Unsupported auth account history version in ${filePath}: ${String(parsed.version)}.`);
+  }
+
+  return normalizeAuthAccountHistoryStore({
+    version: AUTH_ACCOUNT_HISTORY_STORE_VERSION,
+    defaultAccount: parseAuthAccountHistoryAccount(parsed.defaultAccount, `${filePath} defaultAccount`),
+    switches: parseAuthAccountSwitchEvents(parsed.switches, `${filePath} switches`)
+  });
+}
+
+function normalizeAuthAccountHistoryStore(store: AuthAccountHistoryStore): AuthAccountHistoryStore {
+  const defaultAccount =
+    store.defaultAccount === undefined
+      ? undefined
+      : {
+          ...store.defaultAccount,
+          accountId: normalizeRequiredAccountId(store.defaultAccount.accountId, "default account id")
+        };
+
+  return {
+    version: AUTH_ACCOUNT_HISTORY_STORE_VERSION,
+    ...(defaultAccount === undefined ? {} : { defaultAccount }),
+    switches: [...store.switches]
+      .map((entry) => ({
+        timestamp: entry.timestamp,
+        fromAccountId: normalizeRequiredAccountId(entry.fromAccountId, "switch from account id"),
+        toAccountId: normalizeRequiredAccountId(entry.toAccountId, "switch to account id"),
+        source: "auth select" as const
+      }))
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+  };
+}
+
+function parseAuthAccountHistoryAccount(value: unknown, path: string) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!isJsonObject(value)) {
+    throw new Error(`Expected ${path} to be an object.`);
+  }
+
+  const accountId = readRequiredString(value.accountId, `${path}.accountId`);
+  const observedAt = readRequiredIsoDateString(value.observedAt, `${path}.observedAt`);
+
+  if (value.source !== "auth.json") {
+    throw new Error(`Expected ${path}.source to be auth.json.`);
+  }
+
+  return compactUndefined({
+    accountId,
+    observedAt,
+    source: "auth.json" as const,
+    name: readOptionalString(value.name, `${path}.name`),
+    email: readOptionalString(value.email, `${path}.email`),
+    planType: readOptionalString(value.planType, `${path}.planType`)
+  });
+}
+
+function parseAuthAccountSwitchEvents(value: unknown, path: string) {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`Expected ${path} to be an array.`);
+  }
+
+  return value.map((entry, index) => parseAuthAccountSwitchEvent(entry, `${path}[${index}]`));
+}
+
+function parseAuthAccountSwitchEvent(value: unknown, path: string): AuthAccountSwitchEvent {
+  if (!isJsonObject(value)) {
+    throw new Error(`Expected ${path} to be an object.`);
+  }
+
+  if (value.source !== "auth select") {
+    throw new Error(`Expected ${path}.source to be auth select.`);
+  }
+
+  return {
+    timestamp: readRequiredIsoDateString(value.timestamp, `${path}.timestamp`),
+    fromAccountId: readRequiredString(value.fromAccountId, `${path}.fromAccountId`),
+    toAccountId: readRequiredString(value.toAccountId, `${path}.toAccountId`),
+    source: "auth select"
+  };
+}
+
+function readRequiredString(value: JsonValue | undefined, path: string) {
+  const text = readOptionalString(value, path);
+
+  if (text === undefined) {
+    throw new Error(`Expected ${path} to be a non-empty string.`);
+  }
+
+  return text;
+}
+
+function readOptionalString(value: JsonValue | undefined, path: string) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`Expected ${path} to be a string.`);
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
+function readRequiredIsoDateString(value: JsonValue | undefined, path: string) {
+  const text = readRequiredString(value, path);
+
+  if (Number.isNaN(new Date(text).getTime())) {
+    throw new Error(`Expected ${path} to be a valid date string.`);
+  }
+
+  return text;
+}
+
+function normalizeRequiredAccountId(value: string, label: string) {
+  const normalized = value.trim();
+
+  if (normalized.length === 0) {
+    throw new Error(`${label} cannot be empty.`);
+  }
+
+  return normalized;
+}
+
+function compactUndefined<T extends Record<string, unknown>>(value: T) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined)
+  ) as T;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

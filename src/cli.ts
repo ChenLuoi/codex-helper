@@ -19,6 +19,7 @@ import {
   formatWeeklyCycleHistory,
   listWeeklyCycleAnchorsFromFile,
   removeWeeklyCycleAnchorFromFile,
+  type WeeklyCycleAccountSource,
   type WeeklyCycleAnchor,
   type WeeklyCycleReportRow
 } from "./cycles.js";
@@ -26,12 +27,16 @@ import {
   formatAuthProfileEntry,
   formatAuthProfileList,
   formatAuthStatus,
+  ensureCodexAuthAccountHistory,
   listCodexAuthProfiles,
+  readCodexAuthAccountHistory,
   readCodexAuthStatus,
   removeCodexAuthProfile,
   saveCurrentCodexAuthProfile,
   switchCodexAuthProfile,
-  type AuthProfileEntry
+  toAuthAccountUsageHistory,
+  type AuthProfileEntry,
+  type AuthStatusSummary
 } from "./index.js";
 import {
   formatUsageSessionDetail,
@@ -44,6 +49,7 @@ import {
   resolveStatRangeOptions,
   resolveStatOptions,
   type StatFormat,
+  type UsageAccountHistory,
   type UsageDiagnostics,
   type UsageRecord
 } from "./stats.js";
@@ -112,6 +118,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--auth-file <path>", "path to auth.json")
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
     .option("--store-dir <path>", "auth profile store directory")
+    .option("--account-history-file <path>", "auth account history file")
     .option("--account-id <id>", "activate a specific persisted account id")
     .action(async (options: AuthProfileCommandOptions) => {
       const profileOptions = toAuthProfileOptions(options);
@@ -268,7 +275,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
   const statCommand = program
     .command("stat [view] [session]")
     .description("Show Codex session token usage statistics.")
-    .option("-g, --group-by <group>", "aggregation: hour, day, week, month, model, cwd")
+    .option("-g, --group-by <group>", "aggregation: hour, day, week, month, model, cwd, account")
     .option("--sort <sort>", "sort rows by: time, tokens, credits, calls, sessions")
     .option("--limit <n>", "maximum number of rows to show")
     .option("--top <n>", "number of sessions to show when view is sessions")
@@ -276,6 +283,9 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--full-scan", "scan all session files instead of pruning by date")
     .option("--all", "include all session usage instead of a date range")
     .option("--reasoning-effort", "include reasoning effort in model grouping")
+    .option("--account-id <id>", "only include usage attributed to an account id")
+    .option("--auth-file <path>", "path to auth.json for account history initialization")
+    .option("--account-history-file <path>", "auth account history file")
     .option("--verbose", "show scan and parsing diagnostics");
   addStatRangeOptions(statCommand);
   addStatFormatOptions(statCommand);
@@ -297,9 +307,12 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
             ...resolveStatOptions(commandOptions),
             scanAllFiles: commandOptions.fullScan === true
           };
+          const accountOptions = await resolveUsageAccountOptions(commandOptions, {
+            groupBy: statOptions.groupBy
+          });
           spinner =
             statOptions.format === "table" ? ora("Reading Codex session usage").start() : undefined;
-          const report = await readCodexUsageStats(statOptions);
+          const report = await readCodexUsageStats({ ...statOptions, ...accountOptions });
           spinner?.succeed(`Read ${report.totals.calls} usage events.`);
           output.write(
             withTrailingNewline(
@@ -311,10 +324,12 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
 
         if (view === "sessions") {
           const sessionOptions = resolveStatRangeOptions(commandOptions);
+          const accountOptions = await resolveUsageAccountOptions(commandOptions);
 
           if (session !== undefined) {
             const detailOptions = {
               ...sessionOptions,
+              ...accountOptions,
               scanAllFiles: true
             };
             spinner =
@@ -340,6 +355,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
               : parseTopLimit(commandOptions.top);
           const listOptions = {
             ...sessionOptions,
+            ...accountOptions,
             scanAllFiles: commandOptions.fullScan === true
           };
           spinner =
@@ -373,11 +389,14 @@ type StatCommandOptions = {
   format?: string;
   codexHome?: string;
   sessionsDir?: string;
+  authFile?: string;
+  accountHistoryFile?: string;
   today?: boolean;
   yesterday?: boolean;
   month?: boolean;
   all?: boolean;
   reasoningEffort?: boolean;
+  accountId?: string;
   last?: string;
   sort?: string;
   limit?: string;
@@ -391,6 +410,7 @@ type CycleBaseOptions = {
   authFile?: string;
   codexHome?: string;
   cycleFile?: string;
+  accountHistoryFile?: string;
   accountId?: string;
 };
 
@@ -421,6 +441,26 @@ type CycleUsageReadResult = {
   diagnostics?: UsageDiagnostics;
 };
 
+async function resolveUsageAccountOptions(
+  options: Pick<StatCommandOptions, "accountId" | "authFile" | "codexHome" | "accountHistoryFile">,
+  context: { groupBy?: string } = {}
+): Promise<{ accountHistory?: UsageAccountHistory; accountId?: string }> {
+  if (options.accountId === undefined && context.groupBy !== "account") {
+    return {};
+  }
+
+  const report = await ensureCodexAuthAccountHistory({
+    authFile: options.authFile,
+    codexHome: options.codexHome,
+    accountHistoryFile: options.accountHistoryFile
+  });
+
+  return {
+    accountHistory: toAuthAccountUsageHistory(report.store),
+    accountId: options.accountId
+  };
+}
+
 type AuthStatusCommandOptions = {
   authFile?: string;
   codexHome?: string;
@@ -440,6 +480,7 @@ type AuthProfileCommandOptions = {
   authFile?: string;
   codexHome?: string;
   storeDir?: string;
+  accountHistoryFile?: string;
   accountId?: string;
   yes?: boolean;
 };
@@ -448,7 +489,8 @@ function toAuthProfileOptions(options: AuthProfileCommandOptions) {
   return {
     authFile: options.authFile,
     codexHome: options.codexHome,
-    storeDir: options.storeDir
+    storeDir: options.storeDir,
+    accountHistoryFile: options.accountHistoryFile
   };
 }
 
@@ -469,6 +511,7 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
       at: parseCycleAddTimes(timeParts),
       note: options.note
     });
+    const accountLabel = await resolveCycleAccountLabel(report.accountId, options);
 
     if (report.anchors.length === 1) {
       const anchor = report.anchors[0];
@@ -484,7 +527,7 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
       }
     }
 
-    output.write(`Account: ${report.accountId} (${report.accountSource})\n`);
+    output.write(formatCycleAccountLine(report.accountId, report.accountSource, accountLabel));
     output.write(`Cycle file: ${report.cycleFile}\n`);
   });
 
@@ -495,8 +538,9 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
   addStatFormatOptions(listCommand);
   listCommand.action(async (options: CycleFormattedOptions) => {
     const report = await listWeeklyCycleAnchorsFromFile(await toCycleStateOptions(options));
+    const context = await toCycleReportContext(report, options);
     output.write(
-      withTrailingNewline(formatWeeklyCycleAnchorList(report, resolveCycleFormat(options)))
+      withTrailingNewline(formatWeeklyCycleAnchorList(report, resolveCycleFormat(options), context))
     );
   });
 
@@ -510,9 +554,10 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
       anchorId,
       await toCycleStateOptions(options)
     );
+    const accountLabel = await resolveCycleAccountLabel(report.accountId, options);
 
     output.write(`Removed weekly cycle anchor: ${report.anchor.id}\n`);
-    output.write(`Account: ${report.accountId} (${report.accountSource})\n`);
+    output.write(formatCycleAccountLine(report.accountId, report.accountSource, accountLabel));
     output.write(`Cycle file: ${report.cycleFile}\n`);
   });
 
@@ -525,8 +570,14 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
   currentCommand.action(async (options: CycleUsageOptions) => {
     const format = resolveCycleFormat(options);
     const anchorReport = await listWeeklyCycleAnchorsFromFile(await toCycleStateOptions(options));
+    const context = await toCycleReportContext(anchorReport, options);
     const now = new Date();
-    const usageReport = await readWeeklyCycleUsageForCurrent(anchorReport.anchors, options, now);
+    const usageReport = await readWeeklyCycleUsageForCurrent(
+      anchorReport.anchors,
+      anchorReport.accountId,
+      options,
+      now
+    );
     const report = buildWeeklyCycleCurrentReport({
       anchors: anchorReport.anchors,
       records: usageReport.records,
@@ -537,9 +588,7 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
     output.write(
       withTrailingNewline(
         formatWeeklyCycleCurrent(report, format, {
-          accountId: anchorReport.accountId,
-          accountSource: anchorReport.accountSource,
-          cycleFile: anchorReport.cycleFile
+          ...context
         })
       )
     );
@@ -556,10 +605,12 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
   addStatFormatOptions(historyCommand);
   historyCommand.action(async (cycleId: string | undefined, options: CycleUsageOptions) => {
     const format = resolveCycleFormat(options);
-    const rangeOptions = resolveStatRangeOptions(options);
+    const rangeOptions = resolveCycleHistoryRangeOptions(options);
     const anchorReport = await listWeeklyCycleAnchorsFromFile(await toCycleStateOptions(options));
+    const context = await toCycleReportContext(anchorReport, options);
     const usageReport = await readWeeklyCycleUsageForHistory(
       anchorReport.anchors,
+      anchorReport.accountId,
       options,
       rangeOptions
     );
@@ -584,9 +635,7 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
       output.write(
         withTrailingNewline(
           formatWeeklyCycleDetail(detail, format, {
-            accountId: anchorReport.accountId,
-            accountSource: anchorReport.accountSource,
-            cycleFile: anchorReport.cycleFile
+            ...context
           })
         )
       );
@@ -596,13 +645,30 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
     output.write(
       withTrailingNewline(
         formatWeeklyCycleHistory(report, format, {
-          accountId: anchorReport.accountId,
-          accountSource: anchorReport.accountSource,
-          cycleFile: anchorReport.cycleFile
+          ...context
         })
       )
     );
   });
+}
+
+function resolveCycleHistoryRangeOptions(options: CycleUsageOptions) {
+  return resolveStatRangeOptions({
+    ...options,
+    all: hasExplicitCycleHistoryRange(options) ? options.all : true
+  });
+}
+
+function hasExplicitCycleHistoryRange(options: CycleUsageOptions) {
+  return (
+    options.all === true ||
+    options.today === true ||
+    options.yesterday === true ||
+    options.month === true ||
+    options.last !== undefined ||
+    options.start !== undefined ||
+    options.end !== undefined
+  );
 }
 
 function parseCycleAddTimes(timeParts: string[]) {
@@ -655,6 +721,7 @@ function addCycleStateOptions(command: Command, options: { codexHome?: boolean }
 
   command
     .option("--cycle-file <path>", "weekly cycle anchor store file")
+    .option("--account-history-file <path>", "auth account history file")
     .option("--account-id <id>", "weekly cycle account id");
 }
 
@@ -665,6 +732,108 @@ async function toCycleStateOptions(options: CycleBaseOptions) {
     cycleFile: options.cycleFile,
     accountId: options.accountId
   };
+}
+
+async function toCycleReportContext(
+  report: { accountId: string; accountSource: WeeklyCycleAccountSource; cycleFile: string },
+  options: Pick<CycleBaseOptions, "authFile" | "codexHome" | "accountHistoryFile">
+) {
+  return {
+    accountId: report.accountId,
+    accountLabel: await resolveCycleAccountLabel(report.accountId, options),
+    accountSource: report.accountSource,
+    cycleFile: report.cycleFile
+  };
+}
+
+async function resolveCycleAccountLabel(
+  accountId: string,
+  options: Pick<CycleBaseOptions, "authFile" | "codexHome" | "accountHistoryFile">
+) {
+  const authStatus = await readOptionalCodexAuthStatus(options);
+  const authAccountId =
+    authStatus?.summary.chatgptAccountId ?? authStatus?.summary.tokenAccountId;
+
+  if (authStatus !== undefined && authAccountId === accountId) {
+    return formatCycleAccountLabel(accountId, authStatus.summary);
+  }
+
+  const profileLabel = await readStoredCycleAccountLabel(accountId, options);
+
+  if (profileLabel !== undefined) {
+    return profileLabel;
+  }
+
+  return readHistoryDefaultCycleAccountLabel(accountId, options);
+}
+
+async function readOptionalCodexAuthStatus(
+  options: Pick<CycleBaseOptions, "authFile" | "codexHome">
+) {
+  try {
+    return await readCodexAuthStatus({
+      authFile: options.authFile,
+      codexHome: options.codexHome
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function readStoredCycleAccountLabel(
+  accountId: string,
+  options: Pick<CycleBaseOptions, "authFile" | "codexHome">
+) {
+  try {
+    const profiles = await listCodexAuthProfiles({
+      authFile: options.authFile,
+      codexHome: options.codexHome
+    });
+    const profile = [profiles.current, ...profiles.stored].find(
+      (entry) => entry?.accountId === accountId
+    );
+
+    return profile === undefined ? undefined : formatCycleAccountLabel(accountId, profile.summary);
+  } catch {
+    return undefined;
+  }
+}
+
+async function readHistoryDefaultCycleAccountLabel(
+  accountId: string,
+  options: Pick<CycleBaseOptions, "codexHome" | "accountHistoryFile">
+) {
+  try {
+    const history = await readCodexAuthAccountHistory({
+      codexHome: options.codexHome,
+      accountHistoryFile: options.accountHistoryFile
+    });
+    const defaultAccount = history.store.defaultAccount;
+
+    if (defaultAccount?.accountId !== accountId) {
+      return undefined;
+    }
+
+    return formatCycleAccountLabel(accountId, defaultAccount);
+  } catch {
+    return undefined;
+  }
+}
+
+function formatCycleAccountLabel(
+  accountId: string,
+  account: Pick<AuthStatusSummary, "email" | "name"> | { email?: string; name?: string }
+) {
+  const label = account.email ?? account.name;
+  return label === undefined || label.length === 0 ? undefined : `${label}(${accountId})`;
+}
+
+function formatCycleAccountLine(
+  accountId: string,
+  _accountSource: WeeklyCycleAccountSource,
+  accountLabel: string | undefined
+) {
+  return `Account: ${accountLabel ?? accountId}\n`;
 }
 
 async function readCycleAuthStatus(options: CycleBaseOptions) {
@@ -684,7 +853,8 @@ async function readCycleAuthStatus(options: CycleBaseOptions) {
 
 async function readWeeklyCycleUsageForCurrent(
   anchors: WeeklyCycleAnchor[],
-  options: Pick<CycleUsageOptions, "codexHome" | "sessionsDir">,
+  accountId: string,
+  options: Pick<CycleUsageOptions, "authFile" | "codexHome" | "sessionsDir" | "accountHistoryFile">,
   now: Date
 ): Promise<CycleUsageReadResult> {
   const earliestAnchor = earliestAnchorDate(anchors);
@@ -697,7 +867,8 @@ async function readWeeklyCycleUsageForCurrent(
     sessionsDir: resolveCycleSessionsDir(options),
     start: earliestAnchor,
     end: now,
-    scanAllFiles: true
+    scanAllFiles: true,
+    ...(await resolveCycleUsageAccountOptions(options, accountId))
   });
 
   return {
@@ -708,6 +879,7 @@ async function readWeeklyCycleUsageForCurrent(
 
 async function readWeeklyCycleUsageForHistory(
   anchors: WeeklyCycleAnchor[],
+  accountId: string,
   options: CycleUsageOptions,
   rangeOptions: ReturnType<typeof resolveStatRangeOptions>
 ): Promise<CycleUsageReadResult> {
@@ -727,13 +899,43 @@ async function readWeeklyCycleUsageForHistory(
     sessionsDir: rangeOptions.sessionsDir,
     start: scanStart,
     end: rangeOptions.end,
-    scanAllFiles: true
+    scanAllFiles: true,
+    ...(await resolveCycleUsageAccountOptions(options, accountId))
   });
 
   return {
     records: report.records,
     diagnostics: report.diagnostics
   };
+}
+
+async function resolveCycleUsageAccountOptions(
+  options: Pick<CycleUsageOptions, "authFile" | "codexHome" | "accountHistoryFile">,
+  accountId: string
+) {
+  try {
+    const report = await readCodexAuthAccountHistory({
+      authFile: options.authFile,
+      codexHome: options.codexHome,
+      accountHistoryFile: options.accountHistoryFile
+    });
+    const accountHistory = toAuthAccountUsageHistory(report.store);
+
+    if (accountHistory.defaultAccountId === undefined && accountHistory.switches.length === 0) {
+      return {};
+    }
+
+    return {
+      accountHistory,
+      accountId
+    };
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw error;
+    }
+
+    return {};
+  }
 }
 
 function earliestAnchorDate(anchors: WeeklyCycleAnchor[]) {
@@ -951,9 +1153,21 @@ function formatWeeklyCycleChoice(row: WeeklyCycleReportRow) {
   return [
     row.id,
     row.source,
-    `${row.start.toISOString()} -> ${row.resetAt.toISOString()}`,
+    `${formatLocalDateTime(row.start)} -> ${formatLocalDateTime(row.resetAt)}`,
     `${row.calls} call(s)`
   ].join(" | ");
+}
+
+function formatLocalDateTime(date: Date) {
+  return [
+    date.getFullYear(),
+    pad2(date.getMonth() + 1),
+    pad2(date.getDate())
+  ].join("-") + ` ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
 }
 
 function addStatRangeOptions(command: Command) {
@@ -986,6 +1200,10 @@ function parseTopLimit(value: string | undefined) {
 
 function withTrailingNewline(text: string) {
   return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+function isNotFoundError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 export async function run(argv = process.argv) {
