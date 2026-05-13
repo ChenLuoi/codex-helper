@@ -72,7 +72,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .description("Decode the ID token in auth.json and show key claims.")
     .option("--auth-file <path>", "path to auth.json")
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
-    .option("--json", "print JSON")
+    .option("-j, --json", "print JSON")
     .option("--include-token-claims", "include decoded JWT header and claims in JSON output")
     .action(async (options: AuthStatusCommandOptions) => {
       const report = await readCodexAuthStatus({
@@ -119,7 +119,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
     .option("--store-dir <path>", "auth profile store directory")
     .option("--account-history-file <path>", "auth account history file")
-    .option("--account-id <id>", "activate a specific persisted account id")
+    .option("-A, --account-id <id>", "activate a specific persisted account id")
     .action(async (options: AuthProfileCommandOptions) => {
       const profileOptions = toAuthProfileOptions(options);
       const report = await listCodexAuthProfiles(profileOptions);
@@ -173,7 +173,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--auth-file <path>", "path to auth.json")
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
     .option("--store-dir <path>", "auth profile store directory")
-    .option("--account-id <id>", "remove a specific persisted account id")
+    .option("-A, --account-id <id>", "remove a specific persisted account id")
     .option("-y, --yes", "skip confirmation when --account-id is supplied")
     .action(async (options: AuthProfileCommandOptions) => {
       const profileOptions = toAuthProfileOptions(options);
@@ -252,7 +252,7 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
     .option("--sessions-dir <path>", "Codex sessions directory")
     .option("--cycle-file <path>", "weekly cycle anchor store file")
-    .option("--json", "print JSON")
+    .option("-j, --json", "print JSON")
     .action(async (options: DoctorCommandOptions) => {
       const spinner = options.json === true ? undefined : ora("Checking local environment").start();
       try {
@@ -276,17 +276,17 @@ export function createProgram(options: { output?: NodeJS.WritableStream } = {}) 
     .command("stat [view] [session]")
     .description("Show Codex session token usage statistics.")
     .option("-g, --group-by <group>", "aggregation: hour, day, week, month, model, cwd, account")
-    .option("--sort <sort>", "sort rows by: time, tokens, credits, calls, sessions")
-    .option("--limit <n>", "maximum number of rows to show")
-    .option("--top <n>", "number of sessions to show when view is sessions")
-    .option("--detail", "show full event-level rows for stat sessions <session-id>")
-    .option("--full-scan", "scan all session files instead of pruning by date")
-    .option("--all", "include all session usage instead of a date range")
-    .option("--reasoning-effort", "include reasoning effort in model grouping")
-    .option("--account-id <id>", "only include usage attributed to an account id")
+    .option("-S, --sort <sort>", "sort rows by: time, tokens, credits, calls, sessions")
+    .option("-n, --limit <n>", "maximum number of rows to show")
+    .option("-T, --top <n>", "number of sessions to show when view is sessions")
+    .option("-d, --detail", "show full event-level rows for stat sessions <session-id>")
+    .option("-F, --full-scan", "scan all session files instead of pruning by date")
+    .option("-a, --all", "include all session usage instead of a date range")
+    .option("-r, --reasoning-effort", "include reasoning effort in model grouping")
+    .option("-A, --account-id <id>", "only include usage attributed to an account id")
     .option("--auth-file <path>", "path to auth.json for account history initialization")
     .option("--account-history-file <path>", "auth account history file")
-    .option("--verbose", "show scan and parsing diagnostics");
+    .option("-v, --verbose", "show scan and parsing diagnostics");
   addStatRangeOptions(statCommand);
   addStatFormatOptions(statCommand);
   statCommand.action(
@@ -503,7 +503,7 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
     .command("add")
     .description("Add a weekly cycle anchor.")
     .argument("<time...>", "weekly cycle start time")
-    .option("--note <text>", "anchor note");
+    .option("-n, --note <text>", "anchor note");
   addCycleStateOptions(addCommand);
   addCommand.action(async (timeParts: string[], options: CycleAnchorAddOptions) => {
     const report = await addWeeklyCycleAnchorsToFile({
@@ -598,7 +598,7 @@ function addCycleCommands(program: Command, output: NodeJS.WritableStream) {
     .command("history")
     .description("Show weekly cycle history.")
     .argument("[cycle-id]", "cycle id to show in detail")
-    .option("--select", "interactively select a cycle to show in detail")
+    .option("-i, --select", "interactively select a cycle to show in detail")
     .option("--estimate-before-anchor", "include estimated cycles before the earliest anchor");
   addCycleStateOptions(historyCommand, { codexHome: false });
   addStatRangeOptions(historyCommand);
@@ -722,7 +722,7 @@ function addCycleStateOptions(command: Command, options: { codexHome?: boolean }
   command
     .option("--cycle-file <path>", "weekly cycle anchor store file")
     .option("--account-history-file <path>", "auth account history file")
-    .option("--account-id <id>", "weekly cycle account id");
+    .option("-A, --account-id <id>", "weekly cycle account id");
 }
 
 async function toCycleStateOptions(options: CycleBaseOptions) {
@@ -1172,12 +1172,12 @@ function pad2(value: number) {
 
 function addStatRangeOptions(command: Command) {
   command
-    .option("--start <time>", "start time, defaults to one week before --end")
-    .option("--end <time>", "end time, defaults to now")
-    .option("--today", "use today as the time range")
+    .option("-s, --start <time>", "start time, defaults to one week before --end")
+    .option("-e, --end <time>", "end time, defaults to now")
+    .option("-t, --today", "use today as the time range")
     .option("--yesterday", "use yesterday as the time range")
-    .option("--month", "use the current calendar month as the time range")
-    .option("--last <duration>", "use a recent duration like 12h, 7d, 2w, or 1mo")
+    .option("-m, --month", "use the current calendar month as the time range")
+    .option("-L, --last <duration>", "use a recent duration like 12h, 7d, 2w, or 1mo")
     .option("--codex-home <path>", "Codex home directory", process.env.CODEX_HOME)
     .option("--sessions-dir <path>", "Codex sessions directory");
 }
@@ -1185,7 +1185,7 @@ function addStatRangeOptions(command: Command) {
 function addStatFormatOptions(command: Command) {
   command
     .option("-f, --format <format>", "output format: table, json, csv, markdown", "table")
-    .option("--json", "print JSON; alias for --format json");
+    .option("-j, --json", "print JSON; alias for --format json");
 }
 
 function parseTopLimit(value: string | undefined) {

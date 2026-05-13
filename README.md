@@ -111,9 +111,9 @@ Options:
 | `--codex-home <path>` | Read `<path>/auth.json`. Ignored when `--auth-file` is supplied. |
 | `--store-dir <path>` | Use a specific auth profile store directory for `save`, `list`, `select`, and `remove`. |
 | `--account-history-file <path>` | Use a specific auth account history file for `select`. |
-| `--json` | Include the decoded JWT header and claims as JSON. |
-| `--account-id <id>` | Select or remove a specific persisted profile. |
-| `--yes` | Skip confirmation when removing with `--account-id`. |
+| `-j, --json` | Include the decoded JWT header and claims as JSON. |
+| `-A, --account-id <id>` | Select or remove a specific persisted profile. |
+| `-y, --yes` | Skip confirmation when removing with `--account-id`. |
 
 ### Stat
 
@@ -186,7 +186,8 @@ pass common `YYYY-MM-DD HH:mm` values as unquoted date/time pairs. Time input
 with an explicit offset, such as `2026-05-01T08:00:00+08:00`, is parsed using
 that offset. Time input without an offset, such as `2026-05-01 08:00`, is
 interpreted in the current system time zone. Stored anchors keep the original
-input and save the instant as UTC ISO.
+input and save the instant as UTC ISO. Use `-n, --note <text>` to attach a note
+to added anchors.
 
 History reports include a stable cycle ID in each row. Manual cycles use the
 anchor ID, derived cycles use `cyc_<UTC-start>`, and estimated cycles use
@@ -217,25 +218,25 @@ Cycle options:
 
 | Option | Behavior |
 | --- | --- |
-| `--account-id <id>` | Use a specific cycle account bucket. |
+| `-A, --account-id <id>` | Use a specific cycle account bucket. |
 | `--cycle-file <path>` | Use a specific anchor store file. |
 | `--auth-file <path>` | Use a specific `auth.json` when resolving the account. |
 | `--codex-home <path>` | Resolve `auth.json`, sessions, and the default cycle file under this Codex home. |
 | `--sessions-dir <path>` | Use a specific sessions directory for `current` and `history`. |
-| `--select` | Interactively select a history cycle to show in detail. |
+| `-i, --select` | Interactively select a history cycle to show in detail. |
 | `--estimate-before-anchor` | Include pre-anchor estimated history rows. |
 
 Time range options:
 
 | Option | Behavior |
 | --- | --- |
-| `--start <time>` | Start time. Date-only values start at local `00:00:00.000`. |
-| `--end <time>` | End time. Date-only values end at local `23:59:59.999`. |
-| `--today` | Current local day through now. |
+| `-s, --start <time>` | Start time. Date-only values start at local `00:00:00.000`. |
+| `-e, --end <time>` | End time. Date-only values end at local `23:59:59.999`. |
+| `-t, --today` | Current local day through now. |
 | `--yesterday` | Previous local day. |
-| `--month` | Current local calendar month through now. |
-| `--last <duration>` | Recent duration such as `12h`, `7d`, `2w`, or `1mo`. |
-| `--all` | Scan and include all session usage records without date pruning. |
+| `-m, --month` | Current local calendar month through now. |
+| `-L, --last <duration>` | Recent duration such as `12h`, `7d`, `2w`, or `1mo`. |
+| `-a, --all` | Scan and include all session usage records without date pruning. |
 
 When `--group-by` is not supplied, `stat` chooses a default from the resolved
 time range: ranges up to 48 hours use `hour`, ranges up to 31 days use `day`,
@@ -247,11 +248,14 @@ Aggregation and shaping options:
 
 | Option | Behavior |
 | --- | --- |
-| `--group-by <group>` | Aggregate by `hour`, `day`, `week`, `month`, `model`, or `cwd`. Ignored by `sessions` views. |
-| `--sort <sort>` | Sort rows by `time`, `tokens`, `credits`, `calls`, or `sessions`. |
-| `--limit <n>` | Cap output rows. For `sessions <session-id>`, this caps displayed events while totals still cover the whole matched session. |
-| `--top <n>` | Session-list row count. When both `--top` and `--limit` are supplied to `stat sessions`, `--top` wins. |
-| `--reasoning-effort` | When grouping by `model`, append Codex reasoning effort to the model key. |
+| `-g, --group-by <group>` | Aggregate by `hour`, `day`, `week`, `month`, `model`, or `cwd`. Ignored by `sessions` views. |
+| `-S, --sort <sort>` | Sort rows by `time`, `tokens`, `credits`, `calls`, or `sessions`. |
+| `-n, --limit <n>` | Cap output rows. For `sessions <session-id>`, this caps displayed events while totals still cover the whole matched session. |
+| `-T, --top <n>` | Session-list row count. When both `--top` and `--limit` are supplied to `stat sessions`, `--top` wins. |
+| `-d, --detail` | Show full event-level rows for `stat sessions <session-id>`. |
+| `-F, --full-scan` | Scan all session files instead of pruning by date. |
+| `-r, --reasoning-effort` | When grouping by `model`, append Codex reasoning effort to the model key. |
+| `-A, --account-id <id>` | Only include usage attributed to an account id. |
 
 When `--reasoning-effort` is combined with `--group-by model`, Codex reasoning
 effort is appended when present, for example `gpt-5.5-high` or
@@ -261,9 +265,9 @@ Output options:
 
 | Option | Behavior |
 | --- | --- |
-| `--format <format>` | Output `table`, `json`, `csv`, or `markdown`. |
-| `--json` | Alias for `--format json`. |
-| `--verbose` | Include scan and parsing diagnostics in table output. JSON output always includes diagnostics. |
+| `-f, --format <format>` | Output `table`, `json`, `csv`, or `markdown`. |
+| `-j, --json` | Alias for `--format json`. |
+| `-v, --verbose` | Include scan and parsing diagnostics in table output. JSON output always includes diagnostics. |
 
 Diagnostics include scanned/skipped directories, read/skipped files, read lines,
 invalid JSON lines, token-count events, included usage events, skipped-event

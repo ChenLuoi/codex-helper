@@ -63,7 +63,7 @@ describe("cli", () => {
     expect(helpText).toContain("auth status");
     expect(helpText).toContain("--auth-file");
     expect(helpText).toContain("--codex-home");
-    expect(helpText).toContain("--json");
+    expect(helpText).toContain("-j, --json");
     expect(helpText).toContain("--include-token-claims");
   });
 
@@ -140,7 +140,7 @@ describe("cli", () => {
         storeDir,
         "--codex-home",
         codexHome,
-        "--account-id",
+        "-A",
         "account-b"
       ]);
 
@@ -166,19 +166,73 @@ describe("cli", () => {
     const helpText = statCommand?.helpInformation() ?? "";
 
     expect(helpText).toContain("stat [options] [view] [session]");
-    expect(helpText).toContain("--format");
-    expect(helpText).toContain("--today");
+    expect(helpText).toContain("-f, --format");
+    expect(helpText).toContain("-j, --json");
+    expect(helpText).toContain("-s, --start");
+    expect(helpText).toContain("-e, --end");
+    expect(helpText).toContain("-t, --today");
+    expect(helpText).toContain("-m, --month");
+    expect(helpText).toContain("-L, --last");
     expect(helpText).toContain("hour, day, week, month");
-    expect(helpText).toContain("--sort");
-    expect(helpText).toContain("--limit");
-    expect(helpText).toContain("--detail");
-    expect(helpText).toContain("--full-scan");
-    expect(helpText).toContain("--all");
-    expect(helpText).toContain("--reasoning-effort");
-    expect(helpText).toContain("--account-id");
-    expect(helpText).toContain("--verbose");
-    expect(helpText).toContain("--top");
+    expect(helpText).toContain("-g, --group-by");
+    expect(helpText).toContain("-S, --sort");
+    expect(helpText).toContain("-n, --limit");
+    expect(helpText).toContain("-d, --detail");
+    expect(helpText).toContain("-F, --full-scan");
+    expect(helpText).toContain("-a, --all");
+    expect(helpText).toContain("-r, --reasoning-effort");
+    expect(helpText).toContain("-A, --account-id");
+    expect(helpText).toContain("-v, --verbose");
+    expect(helpText).toContain("-T, --top");
     expect(helpText).not.toContain("cycle");
+  });
+
+  it("parses stat short options", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "codex-helper-stat-short-options-"));
+    const sessionsDir = join(tempDir, "sessions");
+
+    try {
+      await writeCycleSession(sessionsDir, "rollout-2026-05-01T00-00-00-short-options.jsonl", [
+        { timestamp: "2026-05-01T01:00:00.000Z", inputTokens: 100 },
+        { timestamp: "2026-05-01T02:00:00.000Z", inputTokens: 50 }
+      ]);
+
+      const output = await runCli([
+        "stat",
+        "-g",
+        "model",
+        "-S",
+        "credits",
+        "-n",
+        "1",
+        "-r",
+        "-a",
+        "-F",
+        "-v",
+        "-j",
+        "--sessions-dir",
+        sessionsDir
+      ]);
+      const json = JSON.parse(output) as {
+        groupBy: string;
+        includeReasoningEffort: boolean;
+        sortBy: string;
+        limit: number;
+        diagnostics: { scanAllFiles: boolean };
+        totals: { calls: number };
+      };
+
+      expect(json).toMatchObject({
+        groupBy: "model",
+        includeReasoningEffort: true,
+        sortBy: "credits",
+        limit: 1
+      });
+      expect(json.diagnostics.scanAllFiles).toBe(true);
+      expect(json.totals.calls).toBe(2);
+    } finally {
+      await rm(tempDir, { force: true, recursive: true });
+    }
   });
 
   it("prints cycle help text", async () => {
@@ -195,12 +249,15 @@ describe("cli", () => {
     expect(cycleHelpText).toContain("history");
     expect(addHelpText).toContain("cycle add");
     expect(addHelpText).toContain("<time...>");
+    expect(addHelpText).toContain("-n, --note");
+    expect(addHelpText).toContain("--cycle-file");
+    expect(addHelpText).not.toContain("-c, --cycle-file");
     expect(addHelpText).not.toContain("--at");
 
     const historyCommand = cycleCommand?.commands.find((command) => command.name() === "history");
     const historyHelpText = historyCommand?.helpInformation() ?? "";
     expect(historyHelpText).toContain("history [options] [cycle-id]");
-    expect(historyHelpText).toContain("--select");
+    expect(historyHelpText).toContain("-i, --select");
   });
 
   it("adds and lists weekly cycle anchors through the cycle CLI", async () => {
@@ -215,9 +272,9 @@ describe("cli", () => {
         "2026-05-08T08:00:00+08:00",
         "--cycle-file",
         cycleFile,
-        "--account-id",
+        "-A",
         "account-a",
-        "--note",
+        "-n",
         "initial weekly cycle"
       ]);
 
@@ -232,7 +289,7 @@ describe("cli", () => {
         "list",
         "--cycle-file",
         cycleFile,
-        "--account-id",
+        "-A",
         "account-a"
       ]);
 
@@ -417,11 +474,11 @@ describe("cli", () => {
         "cycle-session",
         "--sessions-dir",
         sessionsDir,
-        "--start",
+        "-s",
         "2026-05-10T00:00:00Z",
-        "--end",
+        "-e",
         "2026-05-10T23:59:59Z",
-        "--json"
+        "-j"
       ]);
       const json = JSON.parse(output) as {
         totals: { calls: number };
