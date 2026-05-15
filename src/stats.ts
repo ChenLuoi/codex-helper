@@ -226,11 +226,16 @@ const EMPTY_USAGE: TokenUsage = {
   reasoningOutputTokens: 0,
   totalTokens: 0
 };
+const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_FILE_READ_CONCURRENCY = 8;
 const FULL_SCAN_PREFILTER_CHUNK_SIZE = 64 * 1024;
 const DEFAULT_SESSION_DETAIL_COMPACT_ROWS = 20;
+const BALANCED_SCAN_MIN_LOOKBACK_MS = 2 * DAY_MS;
+const BALANCED_SCAN_MAX_LOOKBACK_MS = 7 * DAY_MS;
 const ALL_USAGE_RANGE_START = new Date(1900, 0, 1);
 const ALL_USAGE_RANGE_END = new Date(9999, 11, 31, 23, 59, 59, 999);
+const FULL_SCAN_ACCURACY_NOTE =
+  "Note: This report used balanced scanning, not a full scan. It reads in-range files and checks a bounded lookback by last token_count timestamp. Use -F, --full-scan to check all pre-range rollout files for exact local token_count results.";
 
 type MutableStatRow = {
   key: string;
@@ -255,6 +260,20 @@ type MutableSession = {
   unpricedCalls: number;
   filePath: string;
 };
+
+type JsonlFileListing = {
+  files: string[];
+  lastUsagePrefilterCandidates: string[];
+};
+
+type JsonlScanPolicy = {
+  scanAllFiles: boolean;
+  start: Date;
+  end: Date;
+  lookbackStart: Date;
+};
+
+type JsonlFileAction = "read" | "prefilter" | "skip";
 
 export function resolveStatOptions(raw: RawStatOptions = {}, now = new Date()): StatOptions {
   const rangeOptions = resolveStatRangeOptions(raw, now);
@@ -996,7 +1015,7 @@ export function formatUsageStats(
   }
 
   if (format === "markdown") {
-    return `${formatMarkdownTable(rows)}\n`;
+    return `${formatMarkdownWithUsageNotes(rows, report, options)}\n`;
   }
 
   const lines = [
@@ -1035,7 +1054,7 @@ export function formatUsageSessions(
   }
 
   if (format === "markdown") {
-    return `${formatMarkdownTable(rows)}\n`;
+    return `${formatMarkdownWithUsageNotes(rows, report, options)}\n`;
   }
 
   const lines = [
@@ -1080,7 +1099,7 @@ export function formatUsageSessionDetail(
   }
 
   if (format === "markdown") {
-    return `${formatMarkdownTable(rows)}\n`;
+    return `${formatMarkdownWithUsageNotes(rows, report, options)}\n`;
   }
 
   const lines = [
@@ -1168,12 +1187,19 @@ function appendSessionDetailBreakdown(lines: string[], label: string, rows: Usag
   );
 }
 
+type UsageReportNotes = Pick<
+  UsageStatsReport | UsageSessionsReport | UsageSessionDetailReport,
+  "start" | "end" | "totals" | "unpricedModels" | "diagnostics"
+>;
+
+type UsageReportScanState = Pick<
+  UsageStatsReport | UsageSessionsReport | UsageSessionDetailReport,
+  "start" | "end" | "diagnostics"
+>;
+
 function appendUsageNotes(
   lines: string[],
-  report: Pick<
-    UsageStatsReport | UsageSessionsReport | UsageSessionDetailReport,
-    "totals" | "unpricedModels" | "diagnostics"
-  >,
+  report: UsageReportNotes,
   options: { verbose?: boolean }
 ) {
   if (report.totals.unpricedCalls > 0) {
@@ -1210,7 +1236,7 @@ function appendUsageNotes(
       `  Directories skipped by date: ${formatInteger(diagnostics.skippedDirectories)}`,
       `  Files read: ${formatInteger(diagnostics.readFiles)}`,
       `  Files skipped by date: ${formatInteger(diagnostics.skippedFiles)}`,
-      `  Files skipped by full-scan prefilter: ${formatInteger(diagnostics.prefilteredFiles)}`,
+      `  Files skipped by last-usage prefilter: ${formatInteger(diagnostics.prefilteredFiles)}`,
       `  File read concurrency: ${formatInteger(diagnostics.fileReadConcurrency)}`,
       `  Lines read: ${formatInteger(diagnostics.readLines)}`,
       `  Invalid JSON lines: ${formatInteger(diagnostics.invalidJsonLines)}`,
@@ -1224,28 +1250,40 @@ function appendUsageNotes(
         diagnostics.skippedEvents.outOfRange
       )}, account mismatch ${formatInteger(diagnostics.skippedEvents.accountMismatch)}`
     );
-  } else if (shouldSuggestFullScan(report.diagnostics)) {
-    const diagnostics = report.diagnostics;
+  }
 
-    if (diagnostics === undefined) {
-      return;
-    }
+  appendFullScanAccuracyNote(lines, report);
+}
 
-    lines.push(
-      "",
-      `Note: ${formatInteger(
-        diagnostics.skippedFiles
-      )} session file(s) were skipped by rollout date. Use --full-scan if you expect long sessions with in-range events inside older files.`
-    );
+function formatMarkdownWithUsageNotes(
+  rows: string[][],
+  report: UsageReportNotes,
+  options: { verbose?: boolean }
+) {
+  const lines = [formatMarkdownTable(rows)];
+  appendUsageNotes(lines, report, options);
+  return lines.join("\n");
+}
+
+function appendFullScanAccuracyNote(
+  lines: string[],
+  report: UsageReportScanState
+) {
+  if (shouldSuggestFullScan(report)) {
+    lines.push("", FULL_SCAN_ACCURACY_NOTE);
   }
 }
 
-function shouldSuggestFullScan(diagnostics: UsageDiagnostics | undefined) {
+function shouldSuggestFullScan(report: UsageReportScanState) {
   return (
-    diagnostics !== undefined &&
-    diagnostics.scanAllFiles === false &&
-    diagnostics.skippedFiles > 0
+    report.diagnostics !== undefined &&
+    report.diagnostics.scanAllFiles === false &&
+    !isAllUsageRange(report)
   );
+}
+
+function usageWarnings(report: UsageReportScanState) {
+  return shouldSuggestFullScan(report) ? [FULL_SCAN_ACCURACY_NOTE] : [];
 }
 
 export function toUsageStatsJson(report: UsageStatsReport) {
@@ -1260,6 +1298,7 @@ export function toUsageStatsJson(report: UsageStatsReport) {
     rows: report.rows,
     totals: report.totals,
     unpricedModels: report.unpricedModels,
+    warnings: usageWarnings(report),
     diagnostics: report.diagnostics
   };
 }
@@ -1278,6 +1317,7 @@ export function toUsageSessionsJson(report: UsageSessionsReport) {
     })),
     totals: report.totals,
     unpricedModels: report.unpricedModels,
+    warnings: usageWarnings(report),
     diagnostics: report.diagnostics
   };
 }
@@ -1309,6 +1349,7 @@ export function toUsageSessionDetailJson(report: UsageSessionDetailReport) {
     reasoningEffortSwitches: report.reasoningEffortSwitches,
     totals: report.totals,
     unpricedModels: report.unpricedModels,
+    warnings: usageWarnings(report),
     diagnostics: report.diagnostics
   };
 }
@@ -1322,11 +1363,13 @@ async function processCodexUsageRecords(
   const diagnostics = createUsageDiagnostics(DEFAULT_FILE_READ_CONCURRENCY, options.scanAllFiles === true);
   const accountHistory = normalizeUsageAccountHistory(options.accountHistory);
   const accountId = normalizeOptionalAccountId(options.accountId);
-  let files = await listJsonlFiles(options.sessionsDir, options, [], diagnostics);
-
-  if (options.scanAllFiles === true) {
-    files = await prefilterFullScanFiles(files, options.start, diagnostics);
-  }
+  const listing = await listJsonlFiles(options.sessionsDir, options, [], diagnostics);
+  const prefilteredFiles = await prefilterFilesByLastUsage(
+    listing.lastUsagePrefilterCandidates,
+    options.start,
+    diagnostics
+  );
+  const files = [...listing.files, ...prefilteredFiles].sort();
 
   diagnostics.readFiles = files.length;
 
@@ -1466,7 +1509,7 @@ async function listJsonlFiles(
   range: Pick<StatRangeOptions, "start" | "end"> & UsageFileScanOptions,
   dateParts: string[] | undefined = [],
   diagnostics = createUsageDiagnostics()
-): Promise<string[]> {
+): Promise<JsonlFileListing> {
   let entries;
   diagnostics.scannedDirectories += 1;
 
@@ -1474,15 +1517,14 @@ async function listJsonlFiles(
     entries = await readdir(root, { withFileTypes: true });
   } catch (error) {
     if (isNotFoundError(error)) {
-      return [];
+      return emptyJsonlFileListing();
     }
 
     throw error;
   }
 
-  const files: string[] = [];
-  const scanAllFiles = range.scanAllFiles === true;
-  const scanWindow = scanAllFiles ? undefined : createDirectoryScanWindow(range);
+  const listing = emptyJsonlFileListing();
+  const scanPolicy = createJsonlScanPolicy(range);
 
   for (const entry of entries) {
     const path = join(root, entry.name);
@@ -1491,26 +1533,102 @@ async function listJsonlFiles(
       const nextDateParts = appendDatePathPart(dateParts, entry.name);
 
       if (
-        scanWindow !== undefined &&
         nextDateParts !== undefined &&
-        isDatePathOutsideWindow(nextDateParts, scanWindow)
+        shouldSkipDateDirectory(nextDateParts, scanPolicy)
       ) {
         diagnostics.skippedDirectories += 1;
         continue;
       }
 
-      files.push(...(await listJsonlFiles(path, range, nextDateParts, diagnostics)));
+      mergeJsonlFileListing(listing, await listJsonlFiles(path, range, nextDateParts, diagnostics));
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      if (scanWindow !== undefined && isRolloutFileOutsideWindow(entry.name, scanWindow)) {
+      const action = classifyJsonlFile(entry.name, scanPolicy);
+
+      if (action === "skip") {
         diagnostics.skippedFiles += 1;
         continue;
       }
 
-      files.push(path);
+      if (action === "prefilter") {
+        listing.lastUsagePrefilterCandidates.push(path);
+      } else {
+        listing.files.push(path);
+      }
     }
   }
 
-  return files.sort();
+  listing.files.sort();
+  listing.lastUsagePrefilterCandidates.sort();
+  return listing;
+}
+
+function emptyJsonlFileListing(): JsonlFileListing {
+  return {
+    files: [],
+    lastUsagePrefilterCandidates: []
+  };
+}
+
+function mergeJsonlFileListing(target: JsonlFileListing, source: JsonlFileListing) {
+  target.files.push(...source.files);
+  target.lastUsagePrefilterCandidates.push(...source.lastUsagePrefilterCandidates);
+}
+
+function createJsonlScanPolicy(
+  range: Pick<StatRangeOptions, "start" | "end"> & UsageFileScanOptions
+): JsonlScanPolicy {
+  const lookbackMs = balancedScanLookbackMs(range);
+
+  return {
+    scanAllFiles: range.scanAllFiles === true,
+    start: range.start,
+    end: range.end,
+    lookbackStart: new Date(range.start.getTime() - lookbackMs)
+  };
+}
+
+function balancedScanLookbackMs(range: Pick<StatRangeOptions, "start" | "end">) {
+  const durationMs = Math.max(0, range.end.getTime() - range.start.getTime());
+  return Math.min(
+    Math.max(Math.floor(durationMs / 2), BALANCED_SCAN_MIN_LOOKBACK_MS),
+    BALANCED_SCAN_MAX_LOOKBACK_MS
+  );
+}
+
+function shouldSkipDateDirectory(parts: string[], policy: JsonlScanPolicy) {
+  const range = datePathRange(parts);
+
+  if (range === undefined) {
+    return false;
+  }
+
+  if (range.start > policy.end) {
+    return true;
+  }
+
+  return !policy.scanAllFiles && range.end < policy.lookbackStart;
+}
+
+function classifyJsonlFile(name: string, policy: JsonlScanPolicy): JsonlFileAction {
+  const timestamp = rolloutTimestampFromFileName(name);
+
+  if (timestamp === undefined) {
+    return "read";
+  }
+
+  if (timestamp > policy.end) {
+    return "skip";
+  }
+
+  if (timestamp >= policy.start) {
+    return "read";
+  }
+
+  if (policy.scanAllFiles || timestamp >= policy.lookbackStart) {
+    return "prefilter";
+  }
+
+  return "skip";
 }
 
 function normalizeUsageAccountHistory(
@@ -1557,7 +1675,7 @@ function resolveUsageAccountId(
   return accountId;
 }
 
-async function prefilterFullScanFiles(
+async function prefilterFilesByLastUsage(
   files: string[],
   start: Date,
   diagnostics: UsageDiagnostics
@@ -1694,27 +1812,6 @@ function appendDatePathPart(parts: string[] | undefined, name: string) {
   }
 
   return undefined;
-}
-
-function createDirectoryScanWindow(range: Pick<StatRangeOptions, "start" | "end">) {
-  // Session files are anchored by rollout start; keep a cushion for cross-day events.
-  return {
-    start: addDays(startOfLocalDay(range.start), -1),
-    end: endOfLocalDay(addDays(range.end, 1))
-  };
-}
-
-function isDatePathOutsideWindow(
-  parts: string[],
-  window: { start: Date; end: Date }
-) {
-  const range = datePathRange(parts);
-  return range !== undefined && (range.end < window.start || range.start > window.end);
-}
-
-function isRolloutFileOutsideWindow(name: string, window: { start: Date; end: Date }) {
-  const timestamp = rolloutTimestampFromFileName(name);
-  return timestamp !== undefined && (timestamp < window.start || timestamp > window.end);
 }
 
 function rolloutTimestampFromFileName(name: string) {

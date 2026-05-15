@@ -19,6 +19,9 @@ npm run build
 npm test
 ```
 
+Published CLI installs support Node.js `>=20.12.0`. Local development currently
+requires Node.js `^22.18.0 || >=24.0.0` for the build tooling.
+
 ## Commands
 
 ```bash
@@ -111,7 +114,8 @@ Options:
 | `--codex-home <path>` | Read `<path>/auth.json`. Ignored when `--auth-file` is supplied. |
 | `--store-dir <path>` | Use a specific auth profile store directory for `save`, `list`, `select`, and `remove`. |
 | `--account-history-file <path>` | Use a specific auth account history file for `select`. |
-| `-j, --json` | Include the decoded JWT header and claims as JSON. |
+| `-j, --json` | Print JSON output with the summarized auth fields. |
+| `--include-token-claims` | Include the decoded JWT header and claims in JSON output. |
 | `-A, --account-id <id>` | Select or remove a specific persisted profile. |
 | `-y, --yes` | Skip confirmation when removing with `--account-id`. |
 
@@ -125,9 +129,15 @@ codex-helper stat [view] [session]
 
 `stat` reads Codex session JSONL files from `~/.codex/sessions` by default.
 Use `--codex-home` or `--sessions-dir` to point it at another Codex data
-directory. The scanner prunes date-shaped `YYYY/MM/DD` directories and rollout
-filenames by the requested range, then reads matching files with bounded
-concurrency.
+directory. The default scanner reads rollout files in the requested range and
+checks older rollout files in a bounded lookback window by their last
+`token_count` timestamp before deciding whether to read them. The lookback is
+`min(max((end - start) / 2, 2 days), 7 days)`.
+Use `-F, --full-scan` when you need exact local `token_count` results across
+long sessions that may have started before the requested range. Full scan checks
+all rollout files before the requested range by last `token_count` timestamp.
+Date-ranged non-full-scan table and Markdown output includes a reminder, and
+JSON output includes the same message in `warnings`.
 Use `--group-by account` or `--account-id <id>` to initialize/read
 `auth-account-history.json` and attribute `token_count` events by the account
 active at each event timestamp.

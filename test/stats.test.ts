@@ -331,7 +331,9 @@ describe("stats", () => {
       }
     });
     expect(formatUsageStats(report)).toContain("Range: all");
+    expect(formatUsageStats(report)).not.toContain("Use -F, --full-scan");
     expect(toUsageStatsJson(report).start).toBe(options.start.toISOString());
+    expect(toUsageStatsJson(report).warnings).toEqual([]);
   });
 
   it("can scan all JSONL files for long sessions while preserving event range filtering", async () => {
@@ -354,7 +356,7 @@ describe("stats", () => {
       skippedFiles: 1,
       includedUsageEvents: 0
     });
-    expect(formatUsageStats(defaultReport)).toContain("Use --full-scan");
+    expect(formatUsageStats(defaultReport)).toContain("Use -F, --full-scan");
 
     const preciseRecords = await readCodexUsageRecords({
       sessionsDir,
@@ -388,7 +390,89 @@ describe("stats", () => {
         outOfRange: 1
       }
     });
-    expect(formatUsageStats(preciseReport)).not.toContain("Use --full-scan");
+    expect(formatUsageStats(preciseReport)).not.toContain("Use -F, --full-scan");
+  });
+
+  it("balanced scanning checks only the bounded lookback before the requested range", async () => {
+    const sessionsDir = await createBalancedScanFixture();
+    const start = new Date("2026-05-10T00:00:00.000Z");
+    const end = new Date("2026-05-10T23:59:59.999Z");
+
+    const defaultReport = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir
+    });
+
+    expect(defaultReport.rows.map((row) => `${row.key}:${row.calls}`)).toEqual([
+      "2026-05-10:2"
+    ]);
+    expect(defaultReport.diagnostics).toMatchObject({
+      scanAllFiles: false,
+      readFiles: 2,
+      skippedDirectories: 1,
+      skippedFiles: 1,
+      prefilteredFiles: 1,
+      includedUsageEvents: 2
+    });
+
+    const fullScanReport = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir,
+      scanAllFiles: true
+    });
+
+    expect(fullScanReport.rows.map((row) => `${row.key}:${row.calls}`)).toEqual([
+      "2026-05-10:3"
+    ]);
+    expect(fullScanReport.diagnostics).toMatchObject({
+      scanAllFiles: true,
+      readFiles: 3,
+      skippedDirectories: 0,
+      skippedFiles: 1,
+      prefilteredFiles: 1,
+      includedUsageEvents: 3
+    });
+  });
+
+  it("warns on every balanced scan even when no files were skipped", async () => {
+    const sessionsDir = await createSingleSessionFixture();
+    const start = new Date("2026-05-10T00:00:00.000Z");
+    const end = new Date("2026-05-10T23:59:59.999Z");
+    const report = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir
+    });
+
+    expect(report.diagnostics).toMatchObject({
+      scanAllFiles: false,
+      skippedDirectories: 0,
+      skippedFiles: 0
+    });
+    expect(formatUsageStats(report)).toContain("Use -F, --full-scan");
+    expect(formatUsageStats(report, "table", { verbose: true })).toContain(
+      "Use -F, --full-scan"
+    );
+    expect(formatUsageStats(report, "markdown")).toContain("Use -F, --full-scan");
+    const sessionsReport = await readCodexUsageSessions({ start, end, sessionsDir });
+    expect(formatUsageSessions(sessionsReport)).toContain("Use -F, --full-scan");
+    expect(toUsageStatsJson(report).warnings[0]).toContain("Use -F, --full-scan");
+
+    const fullScanReport = await readCodexUsageStats({
+      start,
+      end,
+      groupBy: "day",
+      sessionsDir,
+      scanAllFiles: true
+    });
+
+    expect(formatUsageStats(fullScanReport)).not.toContain("Use -F, --full-scan");
+    expect(toUsageStatsJson(fullScanReport).warnings).toEqual([]);
   });
 
   it("prefilters full-scan files whose last usage is before the requested range", async () => {
@@ -413,7 +497,7 @@ describe("stats", () => {
       includedUsageEvents: 1
     });
     expect(formatUsageStats(report, "table", { verbose: true })).toContain(
-      "Files skipped by full-scan prefilter: 1"
+      "Files skipped by last-usage prefilter: 1"
     );
   });
 
@@ -704,6 +788,113 @@ async function createFixtureSessions() {
   return sessionsDir;
 }
 
+async function createSingleSessionFixture() {
+  const root = await mkdtemp(join(tmpdir(), "codex-helper-stats-single-"));
+  const sessionsDir = join(root, "sessions");
+  const dayDir = join(sessionsDir, "2026", "05", "10");
+  await mkdir(dayDir, { recursive: true });
+
+  await writeFile(
+    join(dayDir, "rollout-2026-05-10T09-00-00-single-session.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "single-session", model: "gpt-5.5", cwd: "/repo/single" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: usage(10, 1, 2, 0, 12),
+            total_token_usage: usage(10, 1, 2, 0, 12)
+          }
+        }
+      })
+    ].join("\n")
+  );
+
+  return sessionsDir;
+}
+
+async function createBalancedScanFixture() {
+  const root = await mkdtemp(join(tmpdir(), "codex-helper-stats-balanced-"));
+  const sessionsDir = join(root, "sessions");
+  const inRangeDir = join(sessionsDir, "2026", "05", "10");
+  const lookbackDir = join(sessionsDir, "2026", "05", "08");
+  const olderDir = join(sessionsDir, "2026", "05", "07");
+  const futureDir = join(sessionsDir, "2026", "05", "11");
+  await mkdir(inRangeDir, { recursive: true });
+  await mkdir(lookbackDir, { recursive: true });
+  await mkdir(olderDir, { recursive: true });
+  await mkdir(futureDir, { recursive: true });
+
+  await writeFile(
+    join(inRangeDir, "rollout-2026-05-10T09-00-00-in-range.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "in-range", model: "gpt-5.5", cwd: "/repo/in-range" }
+      }),
+      tokenCountLine("2026-05-10T09:00:01.000Z", usage(10, 1, 2, 0, 12))
+    ].join("\n")
+  );
+
+  await writeFile(
+    join(lookbackDir, "rollout-2026-05-08T09-00-00-lookback-live.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-08T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "lookback-live", model: "gpt-5.5", cwd: "/repo/lookback" }
+      }),
+      tokenCountLine("2026-05-09T09:00:00.000Z", usage(100, 0, 10, 0, 110)),
+      tokenCountLine("2026-05-10T10:00:00.000Z", usage(120, 0, 12, 0, 132))
+    ].join("\n")
+  );
+
+  await writeFile(
+    join(lookbackDir, "rollout-2026-05-08T10-00-00-lookback-old.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-08T10:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "lookback-old", model: "gpt-5.5", cwd: "/repo/lookback" }
+      }),
+      tokenCountLine("2026-05-09T10:00:00.000Z", usage(1000, 0, 100, 0, 1100))
+    ].join("\n")
+  );
+
+  await writeFile(
+    join(olderDir, "rollout-2026-05-07T09-00-00-older-live.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-07T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "older-live", model: "gpt-5.5", cwd: "/repo/older" }
+      }),
+      tokenCountLine("2026-05-10T11:00:00.000Z", usage(130, 0, 13, 0, 143))
+    ].join("\n")
+  );
+
+  await writeFile(
+    join(futureDir, "rollout-2026-05-11T09-00-00-future.jsonl"),
+    [
+      JSON.stringify({
+        timestamp: "2026-05-11T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "future", model: "gpt-5.5", cwd: "/repo/future" }
+      }),
+      tokenCountLine("2026-05-11T09:00:01.000Z", usage(10000, 0, 1000, 0, 11000))
+    ].join("\n")
+  );
+
+  return sessionsDir;
+}
+
 async function createLongSessionFixture() {
   const root = await mkdtemp(join(tmpdir(), "codex-helper-stats-long-"));
   const sessionsDir = join(root, "sessions");
@@ -813,4 +1004,17 @@ function usage(
     reasoning_output_tokens,
     total_tokens
   };
+}
+
+function tokenCountLine(timestamp: string, total_token_usage: ReturnType<typeof usage>) {
+  return JSON.stringify({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage
+      }
+    }
+  });
 }
