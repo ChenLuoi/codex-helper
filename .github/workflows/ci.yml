@@ -42,17 +42,15 @@ jobs:
       - name: Check binary version
         run: node scripts/check-release.mjs --binary target/release/codex-ops
 
-      - name: Run Rust CLI smoke
+      - name: Run Rust CLI smoke integration test
         run: npm run smoke:rust-cli
-        env:
-          CODEX_OPS_RUST_BINARY: target/release/codex-ops
 
       - name: Run npm shim smoke
         run: npm run smoke:npm-shim
         env:
           CODEX_OPS_RUST_BINARY: target/release/codex-ops
 
-      - name: Run fixture benchmark smoke
+      - name: Run Rust fixture benchmark smoke
         run: npm run bench:rust
 
       - name: Verify release layout dry-run

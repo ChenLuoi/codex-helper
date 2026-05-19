@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// npm/Cargo release metadata guard. Keep this script limited to package,
+// platform manifest, optional dependency, and binary version checks.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";

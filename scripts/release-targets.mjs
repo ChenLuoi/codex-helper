@@ -1,3 +1,6 @@
+// npm platform package target metadata used by release packaging helpers.
+// This file must not contain CLI business behavior or validation matrices.
+
 export const releaseTargets = [
   {
     target: "linux-x64-gnu",

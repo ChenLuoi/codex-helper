@@ -35,12 +35,17 @@ The npm shim can be tested against the local release binary:
 
 ```bash
 rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:npm-shim
-rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:rust-cli
+```
+
+The Rust CLI fixture smoke runs as an integration test:
+
+```bash
+rtk npm run smoke:rust-cli
 ```
 
 Published npm installs support Node.js `>=20.12.0` for the shim. Local
 development requires a Rust stable toolchain; Node.js is only needed for npm
-shim, packaging, release, and benchmark helper scripts.
+shim, packaging, and release helper scripts.
 
 ## Commands
 
@@ -332,14 +337,32 @@ rtk cargo fmt --check
 rtk cargo test
 rtk cargo build --release
 rtk npm run release:check
-rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:rust-cli
+rtk npm run smoke:rust-cli
 rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:npm-shim
 rtk npm run bench:rust
+```
+
+The repository also includes a `justfile` for local orchestration. Recipes only
+compose existing Cargo and npm commands; assertions and fixture behavior belong
+in Rust tests or dedicated helper scripts. In this workspace, run recipes
+through RTK:
+
+```bash
+rtk just --list
+rtk just test
+rtk just build
+rtk just smoke
+rtk just bench
+rtk just release-check
 ```
 
 The default benchmark command is Rust-only and uses the synthetic fixture in
 `test/fixtures/rust-run`. Larger 100x benchmark data is local-only and must not
 be committed.
+
+Node scripts under `scripts/` are reserved for npm shim smoke and npm release
+packaging. Default CLI smoke and benchmark coverage should stay in Rust tests
+or Rust helper binaries.
 
 ## Package Layout
 
@@ -349,9 +372,11 @@ src/lib.rs                       Rust command parsing and dispatch
 src/*.rs                         Rust business modules
 src/bin/codex-ops-stat-poc.rs    Benchmark/development helper binary
 src/bin/codex-ops-session-scale.rs
+src/bin/codex-ops-bench.rs       Rust benchmark smoke helper
 bin/codex-ops.js                 npm shim entrypoint
 npm/<target>/package.json        npm platform package manifests
-scripts/*.mjs                    smoke, benchmark, and release helpers
+justfile                         local command orchestration
+scripts/*.mjs                    npm shim/release helpers
 test/fixtures/rust-run/          synthetic fixture data only
 ```
 

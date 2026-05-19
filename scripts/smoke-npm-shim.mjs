@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// npm shim smoke only. Keep assertions limited to shim forwarding, exit-code
+// propagation, and install-error behavior; CLI behavior belongs in Rust tests.
 
 import { spawnSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";

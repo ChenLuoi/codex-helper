@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// npm release layout dry-run. Keep this script focused on npm pack/install
+// behavior and shim-to-platform-binary resolution.
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";

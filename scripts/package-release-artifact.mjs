@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// npm release artifact staging helper. Keep this script limited to packaging
+// the already-built Rust binary, platform package files, manifests, and sums.
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";

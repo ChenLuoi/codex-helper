@@ -19,9 +19,9 @@
     "test": "cargo test",
     "release:check": "node scripts/check-release.mjs",
     "release:dry-run": "node scripts/verify-release-layout.mjs",
-    "smoke:rust-cli": "node scripts/smoke-rust-cli.mjs",
+    "smoke:rust-cli": "cargo test --test cli_smoke",
     "smoke:npm-shim": "node scripts/smoke-npm-shim.mjs",
-    "bench:rust": "node scripts/bench-rust-run.mjs --fixture test/fixtures/rust-run --runs 1 --rust-binary target/release/codex-ops",
+    "bench:rust": "cargo build --release && cargo run --release --bin codex-ops-bench -- --fixture test/fixtures/rust-run --runs 1",
     "prepublishOnly": "npm run release:check && npm run test && npm run build && npm run smoke:rust-cli && npm run smoke:npm-shim"
   },
   "keywords": [
