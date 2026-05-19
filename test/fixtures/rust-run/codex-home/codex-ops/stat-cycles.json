@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "accounts": {
+    "account-fixture": {
+      "weekly": {
+        "periodHours": 168,
+        "anchors": [
+          {
+            "id": "anc_20260510T090000000Z",
+            "at": "2026-05-10T09:00:00.000Z",
+            "input": "2026-05-10T09:00:00Z",
+            "timeZone": "UTC",
+            "source": "manual",
+            "note": "fixture cycle",
+            "createdAt": "2026-05-10T09:00:00.000Z"
+          }
+        ]
+      }
+    }
+  }
+}

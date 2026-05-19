@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "defaultAccount": {
+    "accountId": "account-fixture",
+    "observedAt": "2026-05-10T08:00:00.000Z",
+    "source": "auth.json",
+    "name": "Fixture User",
+    "email": "fixture@example.test",
+    "planType": "pro"
+  },
+  "switches": []
+}

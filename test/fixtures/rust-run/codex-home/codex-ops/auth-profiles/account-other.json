@@ -1,0 +1,8 @@
+{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "id_token": "eyJhbGciOiJub25lIiwia2lkIjoib3RoZXIta2V5In0.eyJzdWIiOiJ1c2VyX290aGVyIiwiaXNzIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUudGVzdCIsImF1ZCI6WyJjb2RleCJdLCJleHAiOjIwMDAwMDAwMDAsImlhdCI6MTc3ODQ1NzYwMCwibmFtZSI6Ik90aGVyIFVzZXIiLCJlbWFpbCI6Im90aGVyQGV4YW1wbGUudGVzdCIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2NvdW50LW90aGVyIiwidXNlcl9pZCI6InVzZXJfb3RoZXIiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InBsdXMifX0.fixture-signature",
+    "refresh_token": "synthetic-refresh-token-other"
+  },
+  "last_refresh": "2026-05-17T00:00:00.000Z"
+}

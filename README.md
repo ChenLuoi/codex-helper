@@ -1,73 +1,93 @@
-# codex-helper
+# codex-ops
 
-`codex-helper` is a Node.js command line project scaffold for Codex-oriented development workflows.
+`codex-ops` is a Rust CLI for local Codex auth profiles, session usage, and
+weekly cycle workflows.
+
+The public command and Rust crate name are both `codex-ops`. The npm package is
+only a thin distribution shim: it detects the current platform, finds the
+prebuilt Rust binary from an optional platform package, and forwards argv,
+stdio, signals, and exit codes. It does not expose a JavaScript import API and
+does not contain JavaScript business logic.
 
 ## Usage
 
-After the package is published, run it directly with:
+After the npm package is published, run it directly with:
 
 ```bash
-npx codex-helper
+npx codex-ops
 ```
 
-Local development:
+After the crate is published, Rust users can install the same CLI with:
 
 ```bash
-npm install
-npm run dev -- --help
-npm run build
-npm test
+cargo install codex-ops
 ```
 
-Published CLI installs support Node.js `>=20.12.0`. Local development currently
-requires Node.js `^22.18.0 || >=24.0.0` for the build tooling.
+Local development in this repository uses Cargo for the product binary:
+
+```bash
+rtk cargo test
+rtk cargo build --release
+rtk target/release/codex-ops --help
+```
+
+The npm shim can be tested against the local release binary:
+
+```bash
+rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:npm-shim
+rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:rust-cli
+```
+
+Published npm installs support Node.js `>=20.12.0` for the shim. Local
+development requires a Rust stable toolchain; Node.js is only needed for npm
+shim, packaging, release, and benchmark helper scripts.
 
 ## Commands
 
 ```bash
-codex-helper --help
-codex-helper auth status
-codex-helper auth status --auth-file ~/.codex/auth.json
-codex-helper auth status --json
-codex-helper auth save
-codex-helper auth list
-codex-helper auth select
-codex-helper auth select --account-id <account-id>
-codex-helper auth remove
-codex-helper auth remove --account-id <account-id> --yes
-codex-helper doctor
-codex-helper stat
-codex-helper stat --start 2026-05-01 --end 2026-05-12 --group-by day
-codex-helper stat --group-by hour
-codex-helper stat --group-by week
-codex-helper stat --group-by month
-codex-helper stat --group-by model
-codex-helper stat --group-by model --reasoning-effort
-codex-helper stat --group-by cwd
-codex-helper stat --group-by account
-codex-helper stat --account-id <account-id>
-codex-helper stat --all --group-by model --format csv
-codex-helper stat --today
-codex-helper stat --month --format markdown
-codex-helper stat --last 30d --format json
-codex-helper stat --last 2w --format csv
-codex-helper stat --group-by model --sort credits --limit 5
-codex-helper stat --verbose
-codex-helper stat sessions --top 10
-codex-helper stat sessions --sort time --limit 10
-codex-helper stat sessions session-a --last 30d
-codex-helper stat sessions session-a --format json --limit 20
-codex-helper stat sessions --last 30d --format json
-codex-helper cycle add "2026-05-01 08:00" --note "initial weekly cycle"
-codex-helper cycle add "2026-05-01 08:00" "2026-05-09 10:30"
-codex-helper cycle list
-codex-helper cycle remove <anchor-id>
-codex-helper cycle current
-codex-helper cycle history
-codex-helper cycle history <cycle-id>
-codex-helper cycle history --select
-codex-helper cycle history --start 2026-05-01 --end 2026-05-31 --format json
-codex-helper cycle history --estimate-before-anchor
+codex-ops --help
+codex-ops auth status
+codex-ops auth status --auth-file ~/.codex/auth.json
+codex-ops auth status --json
+codex-ops auth save
+codex-ops auth list
+codex-ops auth select
+codex-ops auth select --account-id <account-id>
+codex-ops auth remove
+codex-ops auth remove --account-id <account-id> --yes
+codex-ops doctor
+codex-ops stat
+codex-ops stat --start 2026-05-01 --end 2026-05-12 --group-by day
+codex-ops stat --group-by hour
+codex-ops stat --group-by week
+codex-ops stat --group-by month
+codex-ops stat --group-by model
+codex-ops stat --group-by model --reasoning-effort
+codex-ops stat --group-by cwd
+codex-ops stat --group-by account
+codex-ops stat --account-id <account-id>
+codex-ops stat --all --group-by model --format csv
+codex-ops stat --today
+codex-ops stat --month --format markdown
+codex-ops stat --last 30d --format json
+codex-ops stat --last 2w --format csv
+codex-ops stat --group-by model --sort credits --limit 5
+codex-ops stat --verbose
+codex-ops stat sessions --top 10
+codex-ops stat sessions --sort time --limit 10
+codex-ops stat sessions session-a --last 30d
+codex-ops stat sessions session-a --format json --limit 20
+codex-ops stat sessions --last 30d --format json
+codex-ops cycle add "2026-05-01 08:00" --note "initial weekly cycle"
+codex-ops cycle add "2026-05-01 08:00" "2026-05-09 10:30"
+codex-ops cycle list
+codex-ops cycle remove <anchor-id>
+codex-ops cycle current
+codex-ops cycle history
+codex-ops cycle history <cycle-id>
+codex-ops cycle history --select
+codex-ops cycle history --start 2026-05-01 --end 2026-05-31 --format json
+codex-ops cycle history --estimate-before-anchor
 ```
 
 ### Auth
@@ -75,11 +95,11 @@ codex-helper cycle history --estimate-before-anchor
 Syntax:
 
 ```bash
-codex-helper auth status
-codex-helper auth save
-codex-helper auth list
-codex-helper auth select
-codex-helper auth remove
+codex-ops auth status
+codex-ops auth save
+codex-ops auth list
+codex-ops auth select
+codex-ops auth remove
 ```
 
 Auth commands read `auth.json` from `$CODEX_HOME/auth.json` by default, or
@@ -90,7 +110,7 @@ email, user ID, plan, and organizations. It never prints the raw ID token.
 
 `auth save` persists the entire current `auth.json` under the profile store
 using the account ID as the unique key. By default the store is
-`$CODEX_HOME/codex-helper/auth-profiles`; `--auth-file` only changes which
+`$CODEX_HOME/codex-ops/auth-profiles`; `--auth-file` only changes which
 auth file is read. Use `--store-dir` to choose a different profile store.
 `auth list` only shows the current profile and readable persisted profiles. If a
 persisted profile cannot be decoded, it is listed under skipped profiles instead
@@ -98,7 +118,7 @@ of failing the whole command. `auth select` switches to a persisted profile; in
 an interactive terminal it uses an Up/Down/Enter selection list, saves the
 current `auth.json` first, then replaces `auth.json` with the selected persisted
 content. The first switch also initializes
-`$CODEX_HOME/codex-helper/auth-account-history.json` from the current
+`$CODEX_HOME/codex-ops/auth-account-history.json` from the current
 `auth.json`, then records each successful `auth select` timestamp so usage can be
 attributed back to the active account. `--store-dir` only moves saved auth
 profiles; use `--account-history-file` if the account history itself should live
@@ -124,7 +144,7 @@ Options:
 Syntax:
 
 ```bash
-codex-helper stat [view] [session]
+codex-ops stat [view] [session]
 ```
 
 `stat` reads Codex session JSONL files from `~/.codex/sessions` by default.
@@ -146,20 +166,20 @@ Views:
 
 | Command | Output |
 | --- | --- |
-| `codex-helper stat` | Aggregate token usage by the resolved `group-by` value. |
-| `codex-helper stat sessions` | Top sessions by credits by default. |
-| `codex-helper stat sessions <session-id>` | Event-level token usage timeline for one session. |
+| `codex-ops stat` | Aggregate token usage by the resolved `group-by` value. |
+| `codex-ops stat sessions` | Top sessions by credits by default. |
+| `codex-ops stat sessions <session-id>` | Event-level token usage timeline for one session. |
 
 ### Weekly Limit Cycles
 
 Syntax:
 
 ```bash
-codex-helper cycle add/list/remove
-codex-helper cycle current
-codex-helper cycle history
-codex-helper cycle history <cycle-id>
-codex-helper cycle history --select
+codex-ops cycle add/list/remove
+codex-ops cycle current
+codex-ops cycle history
+codex-ops cycle history <cycle-id>
+codex-ops cycle history --select
 ```
 
 `cycle` estimates Codex weekly-limit usage from local `token_count` events
@@ -172,7 +192,7 @@ cycle is opened yet; the next local usage event after reset becomes the next
 cycle start.
 
 Anchors are stored by account in
-`$CODEX_HOME/codex-helper/stat-cycles.json`. The account is resolved from
+`$CODEX_HOME/codex-ops/stat-cycles.json`. The account is resolved from
 `--account-id`, then the current `auth.json` account, then the fallback
 `default` account bucket. Cycle usage reads `auth-account-history.json` when
 available so usage from other accounts is not mixed into the selected account.
@@ -181,14 +201,14 @@ Use `--cycle-file <path>` for an isolated store.
 Examples:
 
 ```bash
-codex-helper cycle add "2026-05-01 08:00" --note "known reset use"
-codex-helper cycle add "2026-05-01 08:00" "2026-05-09 10:30"
-codex-helper cycle list
-codex-helper cycle current
-codex-helper cycle history --last 30d
-codex-helper cycle history cyc_20260509T080000000Z --last 30d
-codex-helper cycle history --select --last 30d
-codex-helper cycle history --estimate-before-anchor --format json
+codex-ops cycle add "2026-05-01 08:00" --note "known reset use"
+codex-ops cycle add "2026-05-01 08:00" "2026-05-09 10:30"
+codex-ops cycle list
+codex-ops cycle current
+codex-ops cycle history --last 30d
+codex-ops cycle history cyc_20260509T080000000Z --last 30d
+codex-ops cycle history --select --last 30d
+codex-ops cycle history --estimate-before-anchor --format json
 ```
 
 `cycle add` accepts one or more times. Quote values that contain spaces, or
@@ -287,7 +307,7 @@ Credits are estimated from the token counters in each session. Cached input
 tokens are billed at the cached-input rate; regular input credits use
 `max(inputTokens - cachedInputTokens, 0)`. USD estimates use `25 credits = $1`.
 When a model has no configured price, it is excluded from Credits and listed in
-an unpriced-model breakdown with a stub you can fill into `src/pricing.ts`.
+an unpriced-model breakdown with a stub you can fill into `src/pricing.rs`.
 JSON output includes the same information under `unpricedModels`.
 
 | Model | Input / 1M | Cached input / 1M | Output / 1M |
@@ -301,20 +321,67 @@ JSON output includes the same information under `unpricedModels`.
 | GPT-Image-2 (image) | 200 credits | 50 credits | 750 credits |
 | GPT-Image-2 (text) | 125 credits | 31.25 credits | 250 credits |
 
-## Tech Stack
+## Development
 
-- TypeScript for typed source code.
-- tsdown for ESM builds and declaration output.
-- Vitest for unit tests.
-- Commander for CLI parsing.
-- Inquirer for interactive CLI prompts.
-- picocolors and ora for richer terminal output.
+The CLI implementation lives in standard Cargo source paths. Keep business
+logic in Rust; JavaScript is reserved for the npm shim and release helper
+scripts.
+
+```bash
+rtk cargo fmt --check
+rtk cargo test
+rtk cargo build --release
+rtk npm run release:check
+rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:rust-cli
+rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:npm-shim
+rtk npm run bench:rust
+```
+
+The default benchmark command is Rust-only and uses the synthetic fixture in
+`test/fixtures/rust-run`. Larger 100x benchmark data is local-only and must not
+be committed.
 
 ## Package Layout
 
 ```text
-src/cli.ts        CLI entrypoint
-src/index.ts      Public package entry
-test/*.test.ts    Vitest tests
-dist/             Build output
+src/main.rs                      Rust CLI process entry
+src/lib.rs                       Rust command parsing and dispatch
+src/*.rs                         Rust business modules
+src/bin/codex-ops-stat-poc.rs    Benchmark/development helper binary
+src/bin/codex-ops-session-scale.rs
+bin/codex-ops.js                 npm shim entrypoint
+npm/<target>/package.json        npm platform package manifests
+scripts/*.mjs                    smoke, benchmark, and release helpers
+test/fixtures/rust-run/          synthetic fixture data only
 ```
+
+## Release
+
+GitHub Actions builds release artifacts for:
+
+```text
+linux-x64-gnu
+linux-arm64-gnu
+darwin-x64
+darwin-arm64
+win32-x64-msvc
+```
+
+Each artifact contains the Rust binary, `manifest.json`, and `SHA256SUMS`. The
+main npm package depends on platform packages named `codex-ops-<target>` through
+`optionalDependencies`. The release workflow validates Cargo/npm version
+synchronization and only publishes when manually triggered with the explicit
+publish confirmation and configured `CARGO_REGISTRY_TOKEN` / `NPM_TOKEN`
+secrets.
+
+Before publishing, recheck npm platform package name availability, crates.io
+token access, GitHub `release` environment approval, the first release version,
+and whether a separate legacy `codex-helper` migration package or alias is
+needed.
+
+## Data Safety
+
+`codex-ops` reads local Codex files such as `$CODEX_HOME/auth.json`,
+`$CODEX_HOME/sessions`, and `$CODEX_HOME/codex-ops/*`. Do not commit real
+auth files, raw session JSONL, account IDs, tokens, cwd values, or user content.
+Use only synthetic fixtures under `test/fixtures/**`.

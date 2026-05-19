@@ -1,11 +1,14 @@
 node_modules/
 dist/
+target/
 coverage/
 .env
 .DS_Store
+*.swp
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
 task/
+.local-bench-data/

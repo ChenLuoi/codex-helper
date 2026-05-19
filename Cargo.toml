@@ -1,0 +1,15 @@
+[package]
+name = "codex-ops"
+version = "0.1.0"
+edition = "2021"
+description = "A local operations CLI for Codex auth, usage, and cycle workflows."
+license = "MIT"
+readme = "README.md"
+keywords = ["codex", "cli", "usage"]
+categories = ["command-line-utilities"]
+publish = ["crates-io"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

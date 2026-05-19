@@ -1,57 +1,46 @@
 {
-  "name": "codex-helper",
-  "version": "0.4.2",
-  "description": "A command line helper for Codex workflows.",
+  "name": "codex-ops",
+  "version": "0.1.0",
+  "description": "A local operations CLI for Codex auth, usage, and cycle workflows.",
   "type": "module",
-  "main": "./dist/index.mjs",
-  "types": "./dist/index.d.mts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
-    },
-    "./cli": {
-      "types": "./dist/cli.d.mts",
-      "import": "./dist/cli.mjs"
-    }
-  },
   "bin": {
-    "codex-helper": "dist/cli.mjs"
+    "codex-ops": "bin/codex-ops.js"
   },
   "files": [
-    "dist/**/*.d.mts",
-    "dist/**/*.mjs",
+    "bin/**/*.js",
+    "bin/*/codex-ops",
+    "bin/*/codex-ops.exe",
+    "npm/**/bin/codex-ops",
+    "npm/**/bin/codex-ops.exe",
     "README.md"
   ],
   "scripts": {
-    "build": "tsdown",
-    "dev": "tsx src/cli.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+    "build": "cargo build --release",
+    "test": "cargo test",
+    "release:check": "node scripts/check-release.mjs",
+    "release:dry-run": "node scripts/verify-release-layout.mjs",
+    "smoke:rust-cli": "node scripts/smoke-rust-cli.mjs",
+    "smoke:npm-shim": "node scripts/smoke-npm-shim.mjs",
+    "bench:rust": "node scripts/bench-rust-run.mjs --fixture test/fixtures/rust-run --runs 1 --rust-binary target/release/codex-ops",
+    "prepublishOnly": "npm run release:check && npm run test && npm run build && npm run smoke:rust-cli && npm run smoke:npm-shim"
   },
   "keywords": [
     "codex",
     "cli",
-    "helper"
+    "ops",
+    "auth",
+    "usage"
   ],
   "author": "",
   "license": "MIT",
   "engines": {
     "node": ">=20.12.0"
   },
-  "dependencies": {
-    "commander": "^14.0.3",
-    "inquirer": "^13.4.3",
-    "ora": "^9.4.0",
-    "picocolors": "^1.1.1"
-  },
-  "devDependencies": {
-    "@types/node": "^25.7.0",
-    "tsdown": "^0.22.0",
-    "tsx": "^4.21.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.6"
+  "optionalDependencies": {
+    "codex-ops-linux-x64-gnu": "0.1.0",
+    "codex-ops-linux-arm64-gnu": "0.1.0",
+    "codex-ops-darwin-x64": "0.1.0",
+    "codex-ops-darwin-arm64": "0.1.0",
+    "codex-ops-win32-x64-msvc": "0.1.0"
   }
 }

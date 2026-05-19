@@ -2,20 +2,34 @@
 
 ## Project
 
-`codex-helper` is a Node.js CLI package. It is intended to run as:
+`codex-ops` is a Rust CLI distributed through a thin npm shim. It is intended to
+run as:
 
 ```bash
-npx codex-helper
+npx codex-ops
 ```
+
+The Rust crate, npm package, and user-facing binary are all named `codex-ops`.
 
 ## Development
 
-- Use TypeScript for source files.
-- Keep CLI parsing in `src/cli.ts`.
-- Keep reusable logic in `src/index.ts` and cover it with Vitest tests.
-- Build with `npm run build`.
-- Run tests with `npm test`.
-- Run type checks with `npm run typecheck`.
+- Use Rust for CLI business logic.
+- Keep Rust source in standard Cargo paths: `src/**/*.rs` and
+  `src/bin/**/*.rs`.
+- Keep the npm entrypoint in `bin/codex-ops.js` as a shim only: platform
+  detection, binary lookup, process forwarding, and clear install errors.
+- Do not add auth, doctor, stat, cycle, pricing, parsing, or storage business
+  logic to JavaScript.
+- Build with `rtk cargo build --release`.
+- Run tests with `rtk cargo test`.
+- Run release metadata checks with `rtk npm run release:check`.
+- Run shim smoke with
+  `rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:npm-shim`.
+- Run Rust CLI fixture smoke with
+  `rtk env CODEX_OPS_RUST_BINARY=target/release/codex-ops npm run smoke:rust-cli`.
+- Run the default Rust benchmark smoke with `rtk npm run bench:rust`.
+- Do not commit real Codex auth files, session JSONL, account IDs, tokens, cwd
+  values, or user content. Use only synthetic fixtures.
 
 ## Local Shell
 
