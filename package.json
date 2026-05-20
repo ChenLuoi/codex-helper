@@ -1,6 +1,6 @@
 {
   "name": "codex-ops",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local operations CLI for Codex auth, usage, and cycle workflows.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
   "bugs": {
@@ -46,10 +46,10 @@
     "node": ">=20.12.0"
   },
   "optionalDependencies": {
-    "codex-ops-linux-x64-gnu": "0.1.0",
-    "codex-ops-linux-arm64-gnu": "0.1.0",
-    "codex-ops-darwin-x64": "0.1.0",
-    "codex-ops-darwin-arm64": "0.1.0",
-    "codex-ops-win32-x64-msvc": "0.1.0"
+    "codex-ops-linux-x64-gnu": "0.1.1",
+    "codex-ops-linux-arm64-gnu": "0.1.1",
+    "codex-ops-darwin-x64": "0.1.1",
+    "codex-ops-darwin-arm64": "0.1.1",
+    "codex-ops-win32-x64-msvc": "0.1.1"
   }
 }
