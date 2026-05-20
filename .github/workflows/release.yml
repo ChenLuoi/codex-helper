@@ -1,0 +1,212 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to crates.io and npm"
+        required: true
+        default: false
+        type: boolean
+      confirm:
+        description: "Type: publish codex-ops"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.12.0"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check release metadata
+        run: node scripts/check-release.mjs
+
+      - name: Cargo package dry-run
+        run: cargo package --locked --registry crates-io
+
+      - name: Main npm pack dry-run
+        run: npm pack --dry-run
+
+  build-artifacts:
+    name: Build ${{ matrix.platform_target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_target: linux-x64-gnu
+            rust_target: x86_64-unknown-linux-gnu
+            npm_package: codex-ops-linux-x64-gnu
+            binary: codex-ops
+            run_binary: true
+            os: ubuntu-latest
+          - platform_target: linux-arm64-gnu
+            rust_target: aarch64-unknown-linux-gnu
+            npm_package: codex-ops-linux-arm64-gnu
+            binary: codex-ops
+            run_binary: false
+            os: ubuntu-24.04-arm
+          - platform_target: darwin-x64
+            rust_target: x86_64-apple-darwin
+            npm_package: codex-ops-darwin-x64
+            binary: codex-ops
+            run_binary: true
+            os: macos-13
+          - platform_target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            npm_package: codex-ops-darwin-arm64
+            binary: codex-ops
+            run_binary: false
+            os: macos-14
+          - platform_target: win32-x64-msvc
+            rust_target: x86_64-pc-windows-msvc
+            npm_package: codex-ops-win32-x64-msvc
+            binary: codex-ops.exe
+            run_binary: true
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.12.0"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build target
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+
+      - name: Check native binary version
+        if: matrix.run_binary
+        run: node scripts/check-release.mjs --binary target/${{ matrix.rust_target }}/release/${{ matrix.binary }}
+
+      - name: Stage artifact and npm platform package
+        run: >
+          node scripts/package-release-artifact.mjs
+          --target ${{ matrix.platform_target }}
+          --rust-target ${{ matrix.rust_target }}
+          --output-dir dist/release
+
+      - name: Pack npm platform package
+        run: npm pack dist/release/npm/${{ matrix.npm_package }} --pack-destination dist/release/npm-tarballs
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-ops-${{ matrix.platform_target }}
+          path: dist/release/codex-ops-*-${{ matrix.platform_target }}
+          if-no-files-found: error
+
+      - name: Upload npm platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.platform_target }}
+          path: dist/release/npm-tarballs/*.tgz
+          if-no-files-found: error
+
+  publish-crate:
+    name: Publish crate
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    environment: release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.confirm == 'publish codex-ops'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crate
+        run: cargo publish --locked --registry crates-io --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-npm-platforms:
+    name: Publish npm platform packages
+    needs: publish-crate
+    runs-on: ubuntu-latest
+    environment: release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.confirm == 'publish codex-ops'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_target: linux-x64-gnu
+          - platform_target: linux-arm64-gnu
+          - platform_target: darwin-x64
+          - platform_target: darwin-arm64
+          - platform_target: win32-x64-msvc
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.12.0"
+          registry-url: https://registry.npmjs.org
+
+      - name: Download npm package
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-${{ matrix.platform_target }}
+          path: dist/npm-platform
+
+      - name: Publish npm platform package
+        run: npm publish dist/npm-platform/*.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-npm-main:
+    name: Publish npm main package
+    needs: publish-npm-platforms
+    runs-on: ubuntu-latest
+    environment: release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.confirm == 'publish codex-ops'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.12.0"
+          registry-url: https://registry.npmjs.org
+
+      - name: Check release metadata
+        run: node scripts/check-release.mjs
+
+      - name: Publish npm main package
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

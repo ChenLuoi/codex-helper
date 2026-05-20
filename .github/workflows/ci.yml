@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Rust and npm shim
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.12.0"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check release metadata
+        run: node scripts/check-release.mjs
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Run Rust lint
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Check binary version
+        run: node scripts/check-release.mjs --binary target/release/codex-ops
+
+      - name: Run Rust CLI smoke integration test
+        run: npm run smoke:rust-cli
+
+      - name: Run npm shim smoke
+        run: npm run smoke:npm-shim
+        env:
+          CODEX_OPS_RUST_BINARY: target/release/codex-ops
+
+      - name: Run Rust fixture benchmark smoke
+        run: npm run bench:rust
+
+      - name: Verify release layout dry-run
+        run: npm run release:dry-run
+
+      - name: Pack npm main package
+        run: |
+          mkdir -p .tmp/npm-pack
+          npm pack --pack-destination .tmp/npm-pack
