@@ -16,6 +16,8 @@ The Rust crate, npm package, and user-facing binary are all named `codex-ops`.
 - Use Rust for CLI business logic.
 - Keep Rust source in standard Cargo paths: `src/**/*.rs` and
   `src/bin/**/*.rs`.
+- Published Cargo packages must expose only the `codex-ops` user binary; local
+  helper binaries in `src/bin/**/*.rs` are repository-only development assets.
 - Keep the npm entrypoint in `bin/codex-ops.js` as a shim only: platform
   detection, binary lookup, process forwarding, and clear install errors.
 - Do not add auth, doctor, stat, cycle, pricing, parsing, or storage business

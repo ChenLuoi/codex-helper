@@ -17,9 +17,11 @@ const binary = resolve(repoRoot, args.binary ?? join("target", "release", target
 const tempRoot = mkdtempSync(join(tmpdir(), "codex-ops-release-"));
 const packDir = join(tempRoot, "packs");
 const installDir = join(tempRoot, "install");
+const npmCacheDir = join(tempRoot, "npm-cache");
 const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 
 mkdirSync(packDir, { recursive: true });
+mkdirSync(npmCacheDir, { recursive: true });
 
 run(process.execPath, ["scripts/check-release.mjs", "--binary", binary], { cwd: repoRoot });
 
@@ -30,8 +32,11 @@ const staged = stageReleaseArtifact({
   outputDir: join(tempRoot, "staged")
 });
 
-run("npm", ["pack", "--pack-destination", packDir], { cwd: repoRoot });
-run("npm", ["pack", staged.npmPackageDir, "--pack-destination", packDir], { cwd: repoRoot });
+run("npm", ["pack", "--pack-destination", packDir], { cwd: repoRoot, env: npmEnv(process.env) });
+run("npm", ["pack", staged.npmPackageDir, "--pack-destination", packDir], {
+  cwd: repoRoot,
+  env: npmEnv(process.env)
+});
 
 const mainPack = findExactPack(packDir, `codex-ops-${packageJson.version}.tgz`);
 const platformPack = findExactPack(packDir, `${target.packageName}-${packageJson.version}.tgz`);
@@ -47,9 +52,10 @@ run(
     "--omit=optional",
     "--ignore-scripts",
     "--no-audit",
-    "--no-fund"
+    "--no-fund",
+    "--offline"
   ],
-  { cwd: repoRoot }
+  { cwd: repoRoot, env: npmEnv(process.env) }
 );
 
 const installedBin = join(installDir, "node_modules", ".bin", process.platform === "win32" ? "codex-ops.cmd" : "codex-ops");
@@ -121,4 +127,11 @@ function withoutOverride(env) {
   const next = { ...env };
   delete next.CODEX_OPS_RUST_BINARY;
   return next;
+}
+
+function npmEnv(env) {
+  return {
+    ...env,
+    npm_config_cache: npmCacheDir
+  };
 }

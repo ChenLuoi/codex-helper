@@ -8,6 +8,10 @@ default:
 fmt:
     cargo fmt --check
 
+# Run Rust lint checks.
+lint:
+    cargo clippy --all-targets --all-features -- -D warnings
+
 # Run the Rust test suite.
 test:
     cargo test
@@ -18,7 +22,7 @@ build:
 
 # Run the Rust CLI fixture smoke integration test.
 smoke-rust-cli:
-    cargo test --test cli_smoke
+    npm run smoke:rust-cli
 
 # Run the npm shim smoke.
 smoke-npm-shim: build
@@ -37,4 +41,4 @@ release-check: build
     npm run release:dry-run
 
 # Run the local CI-style verification set without publishing.
-ci-local: fmt test build release-check smoke bench
+ci-local: fmt lint test build release-check smoke bench

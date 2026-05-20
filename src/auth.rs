@@ -1,8 +1,9 @@
+use crate::account_history::{self, AccountHistoryAccount, AccountHistoryStore};
 use crate::error::AppError;
 use crate::format::to_pretty_json;
 use crate::storage::{percent_encode, resolve_storage_paths, write_sensitive_file, StorageOptions};
-use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, TimeZone, Utc};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::fs;
@@ -10,7 +11,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const OPENAI_AUTH_CLAIM: &str = "https://api.openai.com/auth";
-const AUTH_ACCOUNT_HISTORY_STORE_VERSION: u8 = 1;
+
+type JwtJsonObject = Map<String, Value>;
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct AuthCommandOptions {
@@ -157,38 +159,6 @@ pub struct AuthProfileRemoveReport {
     pub removed: AuthProfileEntry,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthAccountHistoryAccount {
-    pub account_id: String,
-    pub observed_at: String,
-    pub source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthAccountSwitchEvent {
-    pub timestamp: String,
-    pub from_account_id: String,
-    pub to_account_id: String,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthAccountHistoryStore {
-    pub version: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_account: Option<AuthAccountHistoryAccount>,
-    pub switches: Vec<AuthAccountSwitchEvent>,
-}
-
 struct ParsedAuthFile {
     content: String,
     report: AuthStatusReport,
@@ -311,7 +281,7 @@ pub fn switch_codex_auth_profile(
 
     write_sensitive_file(&saved_profile_file, &read_file_content(&auth_file)?)
         .map_err(|error| AppError::new(error.to_string()))?;
-    write_auth_account_history_store(&account_history_file, &next_history_store)?;
+    account_history::write_account_history_store(&account_history_file, &next_history_store)?;
 
     let selected_content = read_file_content(&profile_file)?;
     if let Err(error) = write_sensitive_file(&auth_file, &selected_content) {
@@ -525,10 +495,7 @@ fn build_codex_auth_status(
     })
 }
 
-fn decode_jwt(
-    token: &str,
-    token_name: &str,
-) -> Result<(Map<String, Value>, Map<String, Value>), AppError> {
+fn decode_jwt(token: &str, token_name: &str) -> Result<(JwtJsonObject, JwtJsonObject), AppError> {
     let parts = token.split('.').collect::<Vec<_>>();
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(AppError::new(format!(
@@ -586,11 +553,15 @@ fn summarize_auth_jwt(
         subject: get_string_claim(claims, "sub"),
         audience: get_string_array_claim(claims, "aud"),
         jwt_id: get_string_claim(claims, "jti"),
-        issued_at: read_numeric_date_claim(claims, "iat").map(format_iso),
-        expires_at: expires_at.map(format_iso),
-        not_before: read_numeric_date_claim(claims, "nbf").map(format_iso),
-        auth_time: read_numeric_date_claim(claims, "auth_time").map(format_iso),
-        requested_auth_time: read_numeric_date_claim(claims, "rat").map(format_iso),
+        issued_at: read_numeric_date_claim(claims, "iat")
+            .map(account_history::format_account_history_iso),
+        expires_at: expires_at.map(account_history::format_account_history_iso),
+        not_before: read_numeric_date_claim(claims, "nbf")
+            .map(account_history::format_account_history_iso),
+        auth_time: read_numeric_date_claim(claims, "auth_time")
+            .map(account_history::format_account_history_iso),
+        requested_auth_time: read_numeric_date_claim(claims, "rat")
+            .map(account_history::format_account_history_iso),
         is_expired: expires_at.map(|expires_at| expires_at <= now),
         seconds_until_expiry,
         name: get_string_claim(claims, "name"),
@@ -661,141 +632,33 @@ fn read_stored_codex_auth_profiles(
     Ok((profiles, skipped))
 }
 
-fn read_auth_account_history_store(file_path: &Path) -> Result<AuthAccountHistoryStore, AppError> {
-    let content = match fs::read_to_string(file_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(create_empty_auth_account_history_store())
-        }
-        Err(error) => return Err(AppError::new(error.to_string())),
-    };
-
-    parse_auth_account_history_store(&content, file_path)
-}
-
-fn write_auth_account_history_store(
-    file_path: &Path,
-    store: &AuthAccountHistoryStore,
-) -> Result<(), AppError> {
-    let normalized = normalize_auth_account_history_store(store.clone())?;
-    let content = serde_json::to_string_pretty(&normalized)
-        .map_err(|error| AppError::new(error.to_string()))?;
-    write_sensitive_file(file_path, &format!("{content}\n"))
-        .map_err(|error| AppError::new(error.to_string()))
-}
-
 fn build_codex_auth_profile_switch_history(
     account_history_file: &Path,
     saved_current: &AuthProfileEntry,
     activated: &AuthProfileEntry,
     now: DateTime<Utc>,
-) -> Result<AuthAccountHistoryStore, AppError> {
-    let current_store = read_auth_account_history_store(account_history_file)?;
-    let mut ensured = ensure_auth_account_history_default(
+) -> Result<AccountHistoryStore, AppError> {
+    let current_store = account_history::read_account_history_store(account_history_file)?;
+    account_history::record_auth_select_switch(
         current_store,
         auth_profile_entry_to_history_account(saved_current, now),
-    )?;
-    ensured.switches.push(AuthAccountSwitchEvent {
-        timestamp: format_iso(now),
-        from_account_id: saved_current.account_id.clone(),
-        to_account_id: activated.account_id.clone(),
-        source: "auth select".to_string(),
-    });
-    normalize_auth_account_history_store(ensured)
-}
-
-fn ensure_auth_account_history_default(
-    store: AuthAccountHistoryStore,
-    account: AuthAccountHistoryAccount,
-) -> Result<AuthAccountHistoryStore, AppError> {
-    let mut normalized = normalize_auth_account_history_store(store)?;
-    if normalized.default_account.is_none() {
-        normalized.default_account = Some(account);
-    }
-    Ok(normalized)
-}
-
-fn create_empty_auth_account_history_store() -> AuthAccountHistoryStore {
-    AuthAccountHistoryStore {
-        version: AUTH_ACCOUNT_HISTORY_STORE_VERSION,
-        default_account: None,
-        switches: Vec::new(),
-    }
-}
-
-fn parse_auth_account_history_store(
-    content: &str,
-    file_path: &Path,
-) -> Result<AuthAccountHistoryStore, AppError> {
-    let parsed: AuthAccountHistoryStore = serde_json::from_str(content).map_err(|error| {
-        AppError::new(format!(
-            "Failed to parse {}: {}",
-            path_to_string(file_path),
-            error
-        ))
-    })?;
-
-    if parsed.version != AUTH_ACCOUNT_HISTORY_STORE_VERSION {
-        return Err(AppError::new(format!(
-            "Unsupported auth account history version in {}: {}.",
-            path_to_string(file_path),
-            parsed.version
-        )));
-    }
-
-    normalize_auth_account_history_store(parsed)
-}
-
-fn normalize_auth_account_history_store(
-    mut store: AuthAccountHistoryStore,
-) -> Result<AuthAccountHistoryStore, AppError> {
-    if let Some(default_account) = &mut store.default_account {
-        default_account.account_id =
-            normalize_required_account_id(&default_account.account_id, "default account id")?;
-        if default_account.source != "auth.json" {
-            return Err(AppError::new(
-                "Expected defaultAccount.source to be auth.json.",
-            ));
-        }
-        validate_iso_date(&default_account.observed_at, "defaultAccount.observedAt")?;
-        default_account.name = normalize_optional_string(default_account.name.take());
-        default_account.email = normalize_optional_string(default_account.email.take());
-        default_account.plan_type = normalize_optional_string(default_account.plan_type.take());
-    }
-
-    for entry in &mut store.switches {
-        validate_iso_date(&entry.timestamp, "switch.timestamp")?;
-        entry.from_account_id =
-            normalize_required_account_id(&entry.from_account_id, "switch from account id")?;
-        entry.to_account_id =
-            normalize_required_account_id(&entry.to_account_id, "switch to account id")?;
-        if entry.source != "auth select" {
-            return Err(AppError::new("Expected switch.source to be auth select."));
-        }
-    }
-
-    store
-        .switches
-        .sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
-    Ok(AuthAccountHistoryStore {
-        version: AUTH_ACCOUNT_HISTORY_STORE_VERSION,
-        default_account: store.default_account,
-        switches: store.switches,
-    })
+        &saved_current.account_id,
+        &activated.account_id,
+        now,
+    )
 }
 
 fn auth_profile_entry_to_history_account(
     entry: &AuthProfileEntry,
     now: DateTime<Utc>,
-) -> AuthAccountHistoryAccount {
-    AuthAccountHistoryAccount {
-        account_id: entry.account_id.clone(),
-        observed_at: format_iso(now),
-        source: "auth.json".to_string(),
-        name: entry.summary.name.clone(),
-        email: entry.summary.email.clone(),
-        plan_type: entry.summary.plan_type.clone(),
-    }
+) -> AccountHistoryAccount {
+    AccountHistoryAccount::auth_json(
+        entry.account_id.clone(),
+        now,
+        entry.summary.name.clone(),
+        entry.summary.email.clone(),
+        entry.summary.plan_type.clone(),
+    )
 }
 
 fn to_auth_profile_entry(
@@ -997,31 +860,7 @@ fn read_date_value(value: Option<&Value>) -> Option<String> {
 
     DateTime::parse_from_rfc3339(text)
         .ok()
-        .map(|date| format_iso(date.with_timezone(&Utc)))
-}
-
-fn validate_iso_date(value: &str, path: &str) -> Result<(), AppError> {
-    if DateTime::parse_from_rfc3339(value).is_err() {
-        return Err(AppError::new(format!(
-            "Expected {path} to be a valid date string."
-        )));
-    }
-    Ok(())
-}
-
-fn normalize_required_account_id(value: &str, label: &str) -> Result<String, AppError> {
-    let normalized = value.trim();
-    if normalized.is_empty() {
-        return Err(AppError::new(format!("{label} cannot be empty.")));
-    }
-    Ok(normalized.to_string())
-}
-
-fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        (!trimmed.is_empty()).then_some(trimmed)
-    })
+        .map(|date| account_history::format_account_history_iso(date.with_timezone(&Utc)))
 }
 
 fn append_optional_line(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
@@ -1091,10 +930,6 @@ fn base64url_decode(value: &str) -> Result<Vec<u8>, ()> {
     }
 
     Ok(output)
-}
-
-fn format_iso(date: DateTime<Utc>) -> String {
-    date.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -1192,60 +1027,57 @@ mod tests {
         let current_content = auth_content("account-a", "a@example.test", "plus");
         let selected_content = auth_content("account-b", "b@example.test", "pro");
 
-        let result = (|| {
-            fs::create_dir_all(&temp_dir).unwrap();
-            fs::write(&auth_file, &selected_content).unwrap();
-            save_current_codex_auth_profile(
-                &AuthCommandOptions {
-                    auth_file: Some(auth_file.clone()),
-                    store_dir: Some(store_dir.clone()),
-                    ..AuthCommandOptions::default()
-                },
-                now,
-            )
-            .unwrap();
-            fs::write(&auth_file, &current_content).unwrap();
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(&auth_file, &selected_content).unwrap();
+        save_current_codex_auth_profile(
+            &AuthCommandOptions {
+                auth_file: Some(auth_file.clone()),
+                store_dir: Some(store_dir.clone()),
+                ..AuthCommandOptions::default()
+            },
+            now,
+        )
+        .unwrap();
+        fs::write(&auth_file, &current_content).unwrap();
 
-            let report = switch_codex_auth_profile(
-                "account-b",
-                &AuthCommandOptions {
-                    auth_file: Some(auth_file.clone()),
-                    store_dir: Some(store_dir.clone()),
-                    account_history_file: Some(history_file.clone()),
-                    ..AuthCommandOptions::default()
-                },
-                now,
-            )
-            .unwrap();
+        let report = switch_codex_auth_profile(
+            "account-b",
+            &AuthCommandOptions {
+                auth_file: Some(auth_file.clone()),
+                store_dir: Some(store_dir.clone()),
+                account_history_file: Some(history_file.clone()),
+                ..AuthCommandOptions::default()
+            },
+            now,
+        )
+        .unwrap();
 
-            assert_eq!(report.saved_current.account_id, "account-a");
-            assert_eq!(report.activated.account_id, "account-b");
-            assert_eq!(fs::read_to_string(&auth_file).unwrap(), selected_content);
-            assert_eq!(
-                fs::read_to_string(store_dir.join("account-a.json")).unwrap(),
-                current_content
-            );
-            let history: Value =
-                serde_json::from_str(&fs::read_to_string(&history_file).unwrap()).unwrap();
-            assert_eq!(history["defaultAccount"]["accountId"], "account-a");
-            assert_eq!(history["switches"][0]["fromAccountId"], "account-a");
-            assert_eq!(history["switches"][0]["toAccountId"], "account-b");
+        assert_eq!(report.saved_current.account_id, "account-a");
+        assert_eq!(report.activated.account_id, "account-b");
+        assert_eq!(fs::read_to_string(&auth_file).unwrap(), selected_content);
+        assert_eq!(
+            fs::read_to_string(store_dir.join("account-a.json")).unwrap(),
+            current_content
+        );
+        let history: Value =
+            serde_json::from_str(&fs::read_to_string(&history_file).unwrap()).unwrap();
+        assert_eq!(history["defaultAccount"]["accountId"], "account-a");
+        assert_eq!(history["switches"][0]["fromAccountId"], "account-a");
+        assert_eq!(history["switches"][0]["toAccountId"], "account-b");
 
-            let removed = remove_codex_auth_profile(
-                "account-a",
-                &AuthCommandOptions {
-                    store_dir: Some(store_dir.clone()),
-                    ..AuthCommandOptions::default()
-                },
-                now,
-            )
-            .unwrap();
-            assert_eq!(removed.removed.account_id, "account-a");
-            assert!(!store_dir.join("account-a.json").exists());
-        })();
+        let removed = remove_codex_auth_profile(
+            "account-a",
+            &AuthCommandOptions {
+                store_dir: Some(store_dir.clone()),
+                ..AuthCommandOptions::default()
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(removed.removed.account_id, "account-a");
+        assert!(!store_dir.join("account-a.json").exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
-        result
     }
 
     fn jwt(header: &str, payload: &str) -> String {

@@ -7,7 +7,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { optionalDependencyMap, releaseTargets } from "./release-targets.mjs";
+import {
+  expectedReleaseTargetNames,
+  optionalDependencyMap,
+  releaseTargets,
+  unsupportedRuntimeTargets
+} from "./release-targets.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const args = parseArgs(process.argv.slice(2));
@@ -17,11 +22,24 @@ const cargoToml = readFileSync(join(repoRoot, "Cargo.toml"), "utf8");
 const cargoVersion = matchTomlString(cargoToml, "version");
 const cargoName = matchTomlString(cargoToml, "name");
 const cargoPublish = matchTomlValue(cargoToml, "publish");
+const cargoPackageFiles = readCargoPackageList();
 
 assertEqual(packageJson.name, "codex-ops", "package name");
 assertEqual(cargoName, "codex-ops", "Cargo package name");
 assertEqual(packageJson.version, cargoVersion, "package/Cargo version");
 assertEqual(packageJson.bin?.["codex-ops"], "bin/codex-ops.js", "npm bin");
+assertEqual(
+  packageJson.files,
+  [
+    "bin/**/*.js",
+    "bin/*/codex-ops",
+    "bin/*/codex-ops.exe",
+    "npm/**/bin/codex-ops",
+    "npm/**/bin/codex-ops.exe",
+    "README.md"
+  ],
+  "npm main package files"
+);
 assertAbsent(packageJson.main, "package main");
 assertAbsent(packageJson.types, "package types");
 assertAbsent(packageJson.exports, "package exports");
@@ -30,11 +48,42 @@ if (cargoPublish === "false") {
   throw new Error("Cargo.toml still has publish = false; release workflow cannot publish the crate.");
 }
 
+assertCargoPackageIncludes(cargoPackageFiles, [
+  "Cargo.lock",
+  "Cargo.toml",
+  "data/codex-rate-card.json",
+  "README.md",
+  "src/main.rs",
+  "src/lib.rs"
+]);
+assertCargoPackageExcludes(cargoPackageFiles, [
+  ".github/",
+  ".gitignore",
+  ".ignore",
+  "AGENTS.md",
+  "bin/",
+  "justfile",
+  "npm/",
+  "package-lock.json",
+  "package.json",
+  "scripts/",
+  "src/bin/",
+  "task/",
+  "test/",
+  "tests/"
+]);
+
 assertJsonEqual(
   packageJson.optionalDependencies,
   optionalDependencyMap(packageJson.version),
   "package optionalDependencies"
 );
+assertEqual(
+  releaseTargets.map((target) => target.target),
+  expectedReleaseTargetNames,
+  "release targets"
+);
+assertNoUnsupportedOptionalDependencies(packageJson.optionalDependencies, unsupportedRuntimeTargets);
 assertEqual(packageLock.name, packageJson.name, "package-lock name");
 assertEqual(packageLock.version, packageJson.version, "package-lock version");
 assertJsonEqual(
@@ -98,6 +147,28 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+function readCargoPackageList() {
+  const result = spawnSync("cargo", ["package", "--list", "--allow-dirty", "--quiet"], {
+    cwd: repoRoot,
+    encoding: "utf8"
+  });
+
+  if (result.status !== 0) {
+    throw new Error(
+      `Failed to list Cargo package contents\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    );
+  }
+
+  if (result.stderr.trim() !== "") {
+    throw new Error(`Cargo package list wrote stderr:\n${result.stderr}`);
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 function matchTomlString(toml, key) {
   const match = toml.match(new RegExp(`^${key}\\s*=\\s*"([^"]+)"`, "m"));
 
@@ -127,6 +198,34 @@ function assertEqual(actual, expected, label) {
 
 function assertJsonEqual(actual, expected, label) {
   assertEqual(actual, expected, label);
+}
+
+function assertCargoPackageIncludes(files, expectedPaths) {
+  for (const expectedPath of expectedPaths) {
+    if (!files.includes(expectedPath)) {
+      throw new Error(`Cargo package contents: expected ${expectedPath} to be included`);
+    }
+  }
+}
+
+function assertCargoPackageExcludes(files, excludedPaths) {
+  for (const excludedPath of excludedPaths) {
+    const found = files.find((file) => file === excludedPath || file.startsWith(excludedPath));
+    if (found !== undefined) {
+      throw new Error(`Cargo package contents: expected ${excludedPath} to be excluded, found ${found}`);
+    }
+  }
+}
+
+function assertNoUnsupportedOptionalDependencies(optionalDependencies, unsupportedTargets) {
+  const packageNames = Object.keys(optionalDependencies ?? {});
+
+  for (const target of unsupportedTargets) {
+    const packageName = `codex-ops-${target}`;
+    if (packageNames.includes(packageName)) {
+      throw new Error(`${packageName}: unsupported runtime target must not be an optionalDependency`);
+    }
+  }
 }
 
 function stableStringify(value) {

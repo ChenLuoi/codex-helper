@@ -2,7 +2,7 @@ use crate::auth::{read_codex_auth_status, AuthCommandOptions};
 use crate::error::AppError;
 use crate::format::to_pretty_json;
 use crate::pricing::{
-    calculate_credit_cost, list_model_pricing, normalize_model_name,
+    calculate_credit_cost, list_known_unpriced_models, list_model_pricing, normalize_model_name,
     TokenUsage as PricingTokenUsage, CODEX_RATE_CARD_SOURCE,
 };
 use crate::stats::{read_usage_records_report, UsageRecordsReadOptions};
@@ -15,6 +15,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const MIN_NODE_VERSION: NodeVersion = NodeVersion {
+    major: 20,
+    minor: 12,
+    patch: 0,
+};
+const MIN_NODE_VERSION_LABEL: &str = ">=20.12.0";
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct DoctorOptions {
@@ -49,6 +56,13 @@ struct RecentUsageSummary {
     token_count_events: usize,
     included_usage_events: usize,
     unpriced_models: BTreeMap<String, RecentUnpricedModel>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+struct NodeVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,19 +102,16 @@ pub fn read_doctor_report(options: &DoctorOptions, now: DateTime<Utc>) -> Doctor
         account_history_file: None,
     });
 
-    let mut checks = Vec::new();
-    checks.push(check_node_version());
-    checks.push(check_directory("Codex home", &storage.codex_home, false));
-    checks.push(check_auth_file(&storage.auth_file, options, now));
-    checks.push(check_directory(
-        "Sessions directory",
-        &storage.sessions_dir,
-        false,
-    ));
-    checks.push(check_helper_directory(&storage.helper_dir));
-    checks.push(check_cycle_store(&storage.cycle_file));
-    checks.push(check_recent_usage(&storage.sessions_dir, now));
-    checks.push(check_pricing());
+    let checks = vec![
+        check_node_version(),
+        check_directory("Codex home", &storage.codex_home, false),
+        check_auth_file(&storage.auth_file, options, now),
+        check_directory("Sessions directory", &storage.sessions_dir, false),
+        check_helper_directory(&storage.helper_dir),
+        check_cycle_store(&storage.cycle_file),
+        check_recent_usage(&storage.sessions_dir, now),
+        check_pricing(),
+    ];
 
     DoctorReport {
         now,
@@ -182,22 +193,17 @@ fn check_node_version() -> DoctorCheck {
     match Command::new("node").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let major = version
-                .strip_prefix('v')
-                .and_then(|value| value.split('.').next())
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or_default();
 
-            if major >= 20 {
+            if parse_node_version(&version).is_some_and(|parsed| parsed >= MIN_NODE_VERSION) {
                 ok(
                     "Node.js",
-                    format!("{version} satisfies >=20.0.0"),
+                    format!("{version} satisfies {MIN_NODE_VERSION_LABEL}"),
                     Vec::new(),
                 )
             } else {
                 check_error(
                     "Node.js",
-                    format!("{version} is below the required >=20.0.0"),
+                    format!("{version} is below the required {MIN_NODE_VERSION_LABEL}"),
                     Vec::new(),
                 )
             }
@@ -209,6 +215,24 @@ fn check_node_version() -> DoctorCheck {
         ),
         Err(error) => check_error("Node.js", error.to_string(), Vec::new()),
     }
+}
+
+fn parse_node_version(version: &str) -> Option<NodeVersion> {
+    let mut parts = version.strip_prefix('v').unwrap_or(version).split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    let patch_part = parts.next()?;
+    let patch_digits = patch_part
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    let patch = patch_digits.parse::<u32>().ok()?;
+
+    Some(NodeVersion {
+        major,
+        minor,
+        patch,
+    })
 }
 
 fn check_auth_file(auth_file: &Path, options: &DoctorOptions, now: DateTime<Utc>) -> DoctorCheck {
@@ -435,7 +459,7 @@ fn check_recent_usage(sessions_dir: &Path, now: DateTime<Utc>) -> DoctorCheck {
 
 fn check_pricing() -> DoctorCheck {
     let priced = list_model_pricing();
-    let unpriced_count = 0usize;
+    let unpriced_count = list_known_unpriced_models().len();
     let mut details = vec![
         format!("Source: {}", CODEX_RATE_CARD_SOURCE.name),
         format!("Checked: {}", CODEX_RATE_CARD_SOURCE.checked_at),
@@ -612,6 +636,45 @@ mod tests {
             .details
             .iter()
             .any(|detail| detail.contains("GPT-5.3-Codex-Spark")));
+    }
+
+    #[test]
+    fn parses_node_version_with_major_minor_patch() {
+        assert_eq!(
+            parse_node_version("v20.12.0"),
+            Some(NodeVersion {
+                major: 20,
+                minor: 12,
+                patch: 0
+            })
+        );
+        assert_eq!(
+            parse_node_version("20.12.1"),
+            Some(NodeVersion {
+                major: 20,
+                minor: 12,
+                patch: 1
+            })
+        );
+        assert_eq!(
+            parse_node_version("v24.15.0-pre"),
+            Some(NodeVersion {
+                major: 24,
+                minor: 15,
+                patch: 0
+            })
+        );
+        assert_eq!(parse_node_version("v20"), None);
+        assert_eq!(parse_node_version("not-node"), None);
+    }
+
+    #[test]
+    fn node_version_minimum_uses_minor_and_patch() {
+        assert!(parse_node_version("v20.12.0").is_some_and(|version| version >= MIN_NODE_VERSION));
+        assert!(parse_node_version("v20.12.1").is_some_and(|version| version >= MIN_NODE_VERSION));
+        assert!(parse_node_version("v21.0.0").is_some_and(|version| version >= MIN_NODE_VERSION));
+        assert!(parse_node_version("v20.11.9").is_some_and(|version| version < MIN_NODE_VERSION));
+        assert!(parse_node_version("v19.99.99").is_some_and(|version| version < MIN_NODE_VERSION));
     }
 
     #[test]

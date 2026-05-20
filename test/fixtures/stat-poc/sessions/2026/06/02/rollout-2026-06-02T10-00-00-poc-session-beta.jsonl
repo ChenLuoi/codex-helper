@@ -1,4 +1,0 @@
-{"timestamp":"2026-06-02T10:00:00.000Z","type":"session_meta","payload":{"id":"poc-session-beta","model":"gpt-5.4 mini","cwd":"/workspace/poc-beta"}}
-{"timestamp":"2026-06-02T10:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":400,"cached_input_tokens":40,"output_tokens":120,"reasoning_output_tokens":10,"total_tokens":520}}}}
-{"timestamp":"2026-06-02T10:00:02.000Z","type":"turn_context","payload":{"model":"custom-poc-model","cwd":"/workspace/poc-beta/custom","reasoning":{"effort":"medium"}}}
-{"timestamp":"2026-06-02T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":25,"reasoning_output_tokens":0,"total_tokens":75},"total_token_usage":{"input_tokens":450,"cached_input_tokens":40,"output_tokens":145,"reasoning_output_tokens":10,"total_tokens":595}}}}

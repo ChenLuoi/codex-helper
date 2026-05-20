@@ -16,13 +16,14 @@
   ],
   "scripts": {
     "build": "cargo build --release",
+    "lint": "cargo clippy --all-targets --all-features -- -D warnings",
     "test": "cargo test",
     "release:check": "node scripts/check-release.mjs",
     "release:dry-run": "node scripts/verify-release-layout.mjs",
-    "smoke:rust-cli": "cargo test --test cli_smoke",
+    "smoke:rust-cli": "cargo test --tests",
     "smoke:npm-shim": "node scripts/smoke-npm-shim.mjs",
     "bench:rust": "cargo build --release && cargo run --release --bin codex-ops-bench -- --fixture test/fixtures/rust-run --runs 1",
-    "prepublishOnly": "npm run release:check && npm run test && npm run build && npm run smoke:rust-cli && npm run smoke:npm-shim"
+    "prepublishOnly": "npm run release:check && npm run lint && npm run test && npm run build && npm run smoke:rust-cli && npm run smoke:npm-shim"
   },
   "keywords": [
     "codex",

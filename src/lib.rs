@@ -1,9 +1,12 @@
+pub mod account_history;
 pub mod auth;
+pub mod cli;
 pub mod cycles;
 pub mod doctor;
 pub mod error;
 pub mod format;
 pub mod pricing;
+pub mod prompt;
 pub mod stats;
 pub mod storage;
 pub mod time;
@@ -12,240 +15,24 @@ use crate::auth::{
     format_auth_profile_entry, format_auth_profile_list, format_auth_status,
     list_codex_auth_profiles, read_codex_auth_status, remove_codex_auth_profile,
     save_current_codex_auth_profile, switch_codex_auth_profile, AuthCommandOptions,
+    AuthProfileEntry, AuthProfileListReport,
+};
+use crate::cli::{
+    AuthCliCommand, AuthCliPaths, AuthProfileCliOptions, AuthRemoveCliOptions,
+    AuthSelectCliOptions, AuthStatusCliOptions, CliCommand, CycleCliCommand, DoctorCliCommand,
+    DoctorCliPaths, ParsedCli, StatCliCommand,
 };
 use crate::cycles::{
-    run_cycle_add_from_args, run_cycle_current_from_args, run_cycle_history_from_args,
-    run_cycle_list_from_args, run_cycle_remove_from_args,
+    run_cycle_add, run_cycle_current, run_cycle_history, run_cycle_list, run_cycle_remove,
 };
 use crate::doctor::{format_doctor_report, read_doctor_report, DoctorOptions};
 use crate::error::AppError;
-use crate::stats::run_stat_command_from_args;
+use crate::prompt::{DialoguerPrompt, Prompt};
+use crate::stats::run_stat_command;
 use chrono::{DateTime, Utc};
 use std::env;
-use std::path::PathBuf;
 
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-const ROOT_HELP: &str = "\
-Usage: codex-ops <command> [options]
-
-Commands:
-  auth      Show and manage Codex authentication information
-  doctor    Check local Codex Ops configuration and data
-  stat      Show Codex session token usage statistics
-  cycle     Manage Codex weekly limit cycle anchors and usage reports
-
-Options:
-  -h, --help     Print help
-  -V, --version  Print version
-";
-
-const AUTH_HELP: &str = "\
-Usage: codex-ops auth <command> [options]
-
-Commands:
-  status    Decode auth.json and show key claims
-  save      Persist the current auth.json by account id
-  list      List current and persisted auth profiles
-  select    Activate a persisted auth profile
-  remove    Remove persisted auth profiles
-
-Options:
-  -h, --help  Print help
-";
-
-const AUTH_STATUS_HELP: &str = "\
-Usage: codex-ops auth status [options]
-
-Options:
-  --auth-file <path>          Path to auth.json
-  --codex-home <path>         Codex home directory
-  -j, --json                  Print JSON
-  --include-token-claims      Include decoded JWT header and claims in JSON output
-  -h, --help                  Print help
-";
-
-const AUTH_SAVE_HELP: &str = "\
-Usage: codex-ops auth save [options]
-
-Options:
-  --auth-file <path>     Path to auth.json
-  --codex-home <path>    Codex home directory
-  --store-dir <path>     Auth profile store directory
-  -h, --help             Print help
-";
-
-const AUTH_LIST_HELP: &str = "\
-Usage: codex-ops auth list [options]
-
-Options:
-  --auth-file <path>     Path to auth.json
-  --codex-home <path>    Codex home directory
-  --store-dir <path>     Auth profile store directory
-  -h, --help             Print help
-";
-
-const AUTH_SELECT_HELP: &str = "\
-Usage: codex-ops auth select [options]
-
-Options:
-  --auth-file <path>               Path to auth.json
-  --codex-home <path>              Codex home directory
-  --store-dir <path>               Auth profile store directory
-  --account-history-file <path>    Auth account history file
-  -A, --account-id <id>            Activate a specific persisted account id
-  -h, --help                       Print help
-";
-
-const AUTH_REMOVE_HELP: &str = "\
-Usage: codex-ops auth remove [options]
-
-Options:
-  --auth-file <path>      Path to auth.json
-  --codex-home <path>     Codex home directory
-  --store-dir <path>      Auth profile store directory
-  -A, --account-id <id>   Remove a specific persisted account id
-  -y, --yes               Skip confirmation when --account-id is supplied
-  -h, --help              Print help
-";
-
-const DOCTOR_HELP: &str = "\
-Usage: codex-ops doctor [options]
-
-Options:
-  --auth-file <path>      Path to auth.json
-  --codex-home <path>     Codex home directory
-  --sessions-dir <path>   Codex sessions directory
-  --cycle-file <path>     Weekly cycle anchor store file
-  -j, --json              Print JSON
-  -h, --help              Print help
-";
-
-const STAT_HELP: &str = "\
-Usage: codex-ops stat [view] [session] [options]
-
-Views:
-  sessions                 Show top sessions or one session detail
-
-Options:
-  -g, --group-by <group>   hour, day, week, month, model, cwd, account
-  -S, --sort <sort>        time, tokens, credits, calls, sessions
-  -n, --limit <n>          Maximum rows to show
-  -T, --top <n>            Number of sessions to show
-  -d, --detail             Show full event-level rows
-  -F, --full-scan          Scan all session files
-  -a, --all                Include all session usage
-  -r, --reasoning-effort   Include reasoning effort in model grouping
-  -A, --account-id <id>    Only include one account id
-  --auth-file <path>       Path to auth.json
-  --account-history-file <path>
-                             Auth account history file
-  --codex-home <path>      Codex home directory
-  --sessions-dir <path>    Codex sessions directory
-  -s, --start <time>       Start time
-  -e, --end <time>         End time
-  -t, --today              Use today as the range
-  --yesterday              Use yesterday as the range
-  -m, --month              Use the current calendar month
-  -L, --last <duration>    Recent duration such as 12h, 7d, 2w, 1mo
-  -f, --format <format>    table, json, csv, markdown
-  -j, --json               Print JSON
-  -v, --verbose            Show diagnostics
-  -h, --help               Print help
-";
-
-const CYCLE_HELP: &str = "\
-Usage: codex-ops cycle <command> [options]
-
-Commands:
-  add       Add a weekly cycle anchor
-  list      List weekly cycle anchors
-  remove    Remove a weekly cycle anchor
-  current   Show the current weekly cycle
-  history   Show weekly cycle history
-
-Options:
-  -h, --help  Print help
-";
-
-const CYCLE_ADD_HELP: &str = "\
-Usage: codex-ops cycle add <time...> [options]
-
-Options:
-  -n, --note <text>               Anchor note
-  -A, --account-id <id>           Weekly cycle account id
-  --auth-file <path>              Path to auth.json
-  --codex-home <path>             Codex home directory
-  --cycle-file <path>             Weekly cycle anchor store file
-  --account-history-file <path>   Auth account history file
-  -h, --help                      Print help
-";
-
-const CYCLE_LIST_HELP: &str = "\
-Usage: codex-ops cycle list [options]
-
-Options:
-  -A, --account-id <id>           Weekly cycle account id
-  --auth-file <path>              Path to auth.json
-  --codex-home <path>             Codex home directory
-  --cycle-file <path>             Weekly cycle anchor store file
-  --account-history-file <path>   Auth account history file
-  -f, --format <format>           table, json, csv, markdown
-  -j, --json                      Print JSON
-  -h, --help                      Print help
-";
-
-const CYCLE_REMOVE_HELP: &str = "\
-Usage: codex-ops cycle remove <anchor-id> [options]
-
-Options:
-  -A, --account-id <id>           Weekly cycle account id
-  --auth-file <path>              Path to auth.json
-  --codex-home <path>             Codex home directory
-  --cycle-file <path>             Weekly cycle anchor store file
-  --account-history-file <path>   Auth account history file
-  -h, --help                      Print help
-";
-
-const CYCLE_CURRENT_HELP: &str = "\
-Usage: codex-ops cycle current [options]
-
-Options:
-  -A, --account-id <id>           Weekly cycle account id
-  --auth-file <path>              Path to auth.json
-  --codex-home <path>             Codex home directory
-  --sessions-dir <path>           Codex sessions directory
-  --cycle-file <path>             Weekly cycle anchor store file
-  --account-history-file <path>   Auth account history file
-  -f, --format <format>           table, json, csv, markdown
-  -j, --json                      Print JSON
-  -h, --help                      Print help
-";
-
-const CYCLE_HISTORY_HELP: &str = "\
-Usage: codex-ops cycle history [cycle-id] [options]
-
-Options:
-  -i, --select                    Interactively select a cycle detail
-  --estimate-before-anchor        Include estimated cycles before earliest anchor
-  -A, --account-id <id>           Weekly cycle account id
-  --auth-file <path>              Path to auth.json
-  --codex-home <path>             Codex home directory
-  --sessions-dir <path>           Codex sessions directory
-  --cycle-file <path>             Weekly cycle anchor store file
-  --account-history-file <path>   Auth account history file
-  -s, --start <time>              Start time
-  -e, --end <time>                End time
-  -t, --today                     Use today as the range
-  --yesterday                     Use yesterday as the range
-  -m, --month                     Use the current calendar month
-  -L, --last <duration>           Recent duration such as 12h, 7d, 2w, 1mo
-  -a, --all                       Include all session usage
-  -f, --format <format>           table, json, csv, markdown
-  -j, --json                      Print JSON
-  -v, --verbose                   Show diagnostics
-  -h, --help                      Print help
-";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct CliResult {
@@ -263,19 +50,19 @@ impl CliResult {
         }
     }
 
-    fn error(stderr: impl Into<String>) -> Self {
-        Self {
-            code: 2,
-            stdout: String::new(),
-            stderr: ensure_trailing_newline(stderr.into()),
-        }
-    }
-
     fn app_error(error: AppError) -> Self {
         Self {
             code: error.exit_code(),
             stdout: String::new(),
             stderr: ensure_trailing_newline(error.message().to_string()),
+        }
+    }
+
+    fn parse_error(code: i32, stderr: impl Into<String>) -> Self {
+        Self {
+            code,
+            stdout: String::new(),
+            stderr: ensure_trailing_newline(stderr.into()),
         }
     }
 }
@@ -287,55 +74,43 @@ where
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
 
-    match args.first().map(String::as_str) {
-        None | Some("-h") | Some("--help") => CliResult::success(ROOT_HELP),
-        Some("-V") | Some("--version") => CliResult::success(PACKAGE_VERSION),
-        Some("auth") => run_auth(&args[1..]),
-        Some("doctor") => run_doctor(&args[1..]),
-        Some("stat") => run_stat(&args[1..]),
-        Some("cycle") => run_cycle(&args[1..]),
-        Some(command) => {
-            CliResult::error(format!("error: Unknown command: {command}\n\n{ROOT_HELP}"))
-        }
+    match cli::parse_cli(&args) {
+        Ok(ParsedCli::Help(help)) => CliResult::success(help),
+        Ok(ParsedCli::Version) => CliResult::success(PACKAGE_VERSION),
+        Ok(ParsedCli::Command(command)) => match *command {
+            CliCommand::Auth(command) => run_auth(command),
+            CliCommand::Doctor(command) => run_doctor(command),
+            CliCommand::Stat(command) => run_stat(command),
+            CliCommand::Cycle(command) => run_cycle(command),
+        },
+        Err(error) => CliResult::parse_error(error.code, error.message),
     }
 }
 
-fn run_auth(args: &[String]) -> CliResult {
-    match args.first().map(String::as_str) {
-        None | Some("-h") | Some("--help") => CliResult::success(AUTH_HELP),
-        Some("status") => run_auth_status(&args[1..]),
-        Some("save") => run_auth_save(&args[1..]),
-        Some("list") => run_auth_list(&args[1..]),
-        Some("select") => run_auth_select(&args[1..]),
-        Some("remove") => run_auth_remove(&args[1..]),
-        Some(command) => CliResult::error(format!(
-            "error: Unknown auth command: {command}\n\n{AUTH_HELP}"
-        )),
+fn run_auth(command: AuthCliCommand) -> CliResult {
+    match command {
+        AuthCliCommand::Status(options) => run_auth_status(options),
+        AuthCliCommand::Save(options) => run_auth_save(options),
+        AuthCliCommand::List(options) => run_auth_list(options),
+        AuthCliCommand::Select(options) => run_auth_select(options),
+        AuthCliCommand::Remove(options) => run_auth_remove(options),
     }
 }
 
-fn run_auth_status(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(AUTH_STATUS_HELP);
-    }
-
+fn run_auth_status(options: AuthStatusCliOptions) -> CliResult {
     let result = (|| {
-        let options = parse_auth_cli_options(args, AUTH_STATUS_HELP)?;
-        let report = read_codex_auth_status(&options.auth, cli_now()?)?;
+        let auth_options = auth_command_options(&options.paths);
+        let report = read_codex_auth_status(&auth_options, cli_now()?)?;
         format_auth_status(&report, options.json, options.include_token_claims)
     })();
 
     cli_result_from_string(result)
 }
 
-fn run_auth_save(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(AUTH_SAVE_HELP);
-    }
-
+fn run_auth_save(options: AuthProfileCliOptions) -> CliResult {
     let result = (|| {
-        let options = parse_auth_cli_options(args, AUTH_SAVE_HELP)?;
-        let report = save_current_codex_auth_profile(&options.auth, cli_now()?)?;
+        let auth_options = auth_command_options(&options.paths);
+        let report = save_current_codex_auth_profile(&auth_options, cli_now()?)?;
         Ok(format!(
             "Saved auth profile: {}\nStore: {}\n",
             format_auth_profile_entry(&report.profile),
@@ -346,287 +121,279 @@ fn run_auth_save(args: &[String]) -> CliResult {
     cli_result_from_string(result)
 }
 
-fn run_auth_list(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(AUTH_LIST_HELP);
-    }
-
+fn run_auth_list(options: AuthProfileCliOptions) -> CliResult {
     let result = (|| {
-        let options = parse_auth_cli_options(args, AUTH_LIST_HELP)?;
-        let report = list_codex_auth_profiles(&options.auth, cli_now()?)?;
+        let auth_options = auth_command_options(&options.paths);
+        let report = list_codex_auth_profiles(&auth_options, cli_now()?)?;
         Ok(format_auth_profile_list(&report))
     })();
 
     cli_result_from_string(result)
 }
 
-fn run_auth_select(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(AUTH_SELECT_HELP);
-    }
-
+fn run_auth_select(options: AuthSelectCliOptions) -> CliResult {
     let result = (|| {
-        let options = parse_auth_cli_options(args, AUTH_SELECT_HELP)?;
         let now = cli_now()?;
-        let account_id = options.account_id.clone().ok_or_else(|| {
-            AppError::new(
-                "auth select requires an interactive terminal unless --account-id is supplied.",
-            )
-        })?;
-        let report = list_codex_auth_profiles(&options.auth, now)?;
-        let selected = report
-            .stored
-            .iter()
-            .find(|entry| entry.account_id == account_id)
-            .cloned()
-            .ok_or_else(|| {
-                AppError::new(format!(
-                    "No persisted auth profile found for account id: {account_id}"
-                ))
-            })?;
+        let auth_options = auth_command_options(&options.paths);
+        let report = list_codex_auth_profiles(&auth_options, now)?;
+        if let Some(account_id) = options.account_id.as_deref() {
+            return select_auth_profile_by_account_id(account_id, &report, &auth_options, now);
+        }
 
-        if Some(&selected.account_id) == report.current.as_ref().map(|entry| &entry.account_id) {
-            return Ok(format!(
-                "Auth profile already active: {}\n",
-                format_auth_profile_entry(&selected)
+        if !prompt::stdin_and_stderr_are_terminals() {
+            return Err(AppError::new(
+                "auth select requires an interactive terminal unless --account-id is supplied.",
             ));
         }
 
-        let switched = switch_codex_auth_profile(&selected.account_id, &options.auth, now)?;
-        Ok(format!(
-            "Saved current auth profile: {}\nActivated auth profile: {}\n",
-            format_auth_profile_entry(&switched.saved_current),
-            format_auth_profile_entry(&switched.activated)
-        ))
+        let mut prompt = DialoguerPrompt::default();
+        select_auth_profile_interactively(&report, &auth_options, now, &mut prompt)
     })();
 
     cli_result_from_string(result)
 }
 
-fn run_auth_remove(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(AUTH_REMOVE_HELP);
-    }
-
+fn run_auth_remove(options: AuthRemoveCliOptions) -> CliResult {
     let result = (|| {
-        let options = parse_auth_cli_options(args, AUTH_REMOVE_HELP)?;
         let now = cli_now()?;
-        let report = list_codex_auth_profiles(&options.auth, now)?;
+        let auth_options = auth_command_options(&options.paths);
+        let report = list_codex_auth_profiles(&auth_options, now)?;
         if report.stored.is_empty() {
             return Ok("No persisted auth profiles.\n".to_string());
         }
 
-        let account_id = options.account_id.clone().ok_or_else(|| {
-            AppError::new(
-                "auth remove requires an interactive terminal unless --account-id is supplied.",
-            )
-        })?;
-        if !options.yes {
+        if let Some(account_id) = options.account_id.as_deref() {
+            if !options.yes {
+                return Err(AppError::new(
+                    "auth remove --account-id requires --yes when not running interactively.",
+                ));
+            }
+            return remove_auth_profile_by_account_id(account_id, &report, &auth_options, now);
+        }
+
+        if !prompt::stdin_and_stderr_are_terminals() {
             return Err(AppError::new(
-                "auth remove --account-id requires --yes when not running interactively.",
+                "auth remove requires an interactive terminal unless --account-id is supplied.",
             ));
         }
-        let selected = report
-            .stored
-            .iter()
-            .find(|entry| entry.account_id == account_id)
-            .ok_or_else(|| {
-                AppError::new(format!(
-                    "No persisted auth profile found for account id: {account_id}"
-                ))
-            })?;
-        let removed = remove_codex_auth_profile(&selected.account_id, &options.auth, now)?;
-        Ok(format!(
-            "Removed auth profile: {}\n",
-            format_auth_profile_entry(&removed.removed)
-        ))
+
+        let mut prompt = DialoguerPrompt::default();
+        remove_auth_profiles_interactively(&report, &auth_options, now, &mut prompt)
     })();
 
     cli_result_from_string(result)
 }
 
-fn run_doctor(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(DOCTOR_HELP);
+fn select_auth_profile_interactively(
+    report: &AuthProfileListReport,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+    prompt: &mut impl Prompt,
+) -> Result<String, AppError> {
+    if report.stored.is_empty() {
+        return Err(AppError::new("No persisted auth profiles."));
     }
 
+    let items = report
+        .stored
+        .iter()
+        .map(format_auth_profile_entry)
+        .collect::<Vec<_>>();
+    let selected_index = prompt
+        .select("Select auth profile", &items)?
+        .ok_or_else(|| AppError::new("auth select cancelled."))?;
+    let selected = report
+        .stored
+        .get(selected_index)
+        .ok_or_else(|| AppError::new("Prompt returned an invalid auth profile selection."))?;
+
+    select_auth_profile_entry(selected, report, options, now)
+}
+
+fn select_auth_profile_by_account_id(
+    account_id: &str,
+    report: &AuthProfileListReport,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<String, AppError> {
+    let selected = report
+        .stored
+        .iter()
+        .find(|entry| entry.account_id == account_id)
+        .ok_or_else(|| {
+            AppError::new(format!(
+                "No persisted auth profile found for account id: {account_id}"
+            ))
+        })?;
+
+    select_auth_profile_entry(selected, report, options, now)
+}
+
+fn select_auth_profile_entry(
+    selected: &AuthProfileEntry,
+    report: &AuthProfileListReport,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<String, AppError> {
+    if Some(&selected.account_id) == report.current.as_ref().map(|entry| &entry.account_id) {
+        return Ok(format!(
+            "Auth profile already active: {}\n",
+            format_auth_profile_entry(selected)
+        ));
+    }
+
+    let switched = switch_codex_auth_profile(&selected.account_id, options, now)?;
+    Ok(format!(
+        "Saved current auth profile: {}\nActivated auth profile: {}\n",
+        format_auth_profile_entry(&switched.saved_current),
+        format_auth_profile_entry(&switched.activated)
+    ))
+}
+
+fn remove_auth_profiles_interactively(
+    report: &AuthProfileListReport,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+    prompt: &mut impl Prompt,
+) -> Result<String, AppError> {
+    let current_account_id = report
+        .current
+        .as_ref()
+        .map(|entry| entry.account_id.as_str());
+    let candidates = report
+        .stored
+        .iter()
+        .filter(|entry| Some(entry.account_id.as_str()) != current_account_id)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok("No removable persisted auth profiles.\n".to_string());
+    }
+
+    let items = candidates
+        .iter()
+        .map(|entry| format_auth_profile_entry(entry))
+        .collect::<Vec<_>>();
+    let selected_indices = prompt
+        .multi_select("Remove auth profiles", &items)?
+        .ok_or_else(|| AppError::new("auth remove cancelled."))?;
+    if selected_indices.is_empty() {
+        return Err(AppError::new("auth remove cancelled."));
+    }
+
+    let selected = selected_indices
+        .into_iter()
+        .map(|index| {
+            candidates
+                .get(index)
+                .copied()
+                .ok_or_else(|| AppError::new("Prompt returned an invalid auth profile selection."))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let confirmed = prompt
+        .confirm("Remove selected auth profiles?", false)?
+        .unwrap_or(false);
+    if !confirmed {
+        return Err(AppError::new("auth remove cancelled."));
+    }
+
+    selected
+        .into_iter()
+        .map(|entry| remove_auth_profile_entry(entry, options, now))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lines| lines.join("\n"))
+}
+
+fn remove_auth_profile_by_account_id(
+    account_id: &str,
+    report: &AuthProfileListReport,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<String, AppError> {
+    let selected = report
+        .stored
+        .iter()
+        .find(|entry| entry.account_id == account_id)
+        .ok_or_else(|| {
+            AppError::new(format!(
+                "No persisted auth profile found for account id: {account_id}"
+            ))
+        })?;
+
+    remove_auth_profile_entry(selected, options, now)
+}
+
+fn remove_auth_profile_entry(
+    selected: &AuthProfileEntry,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<String, AppError> {
+    let removed = remove_codex_auth_profile(&selected.account_id, options, now)?;
+    Ok(format!(
+        "Removed auth profile: {}",
+        format_auth_profile_entry(&removed.removed)
+    ))
+}
+
+fn run_doctor(command: DoctorCliCommand) -> CliResult {
+    let DoctorCliCommand::Run(options) = command;
     let result = (|| {
-        let options = parse_doctor_cli_options(args, DOCTOR_HELP)?;
-        let report = read_doctor_report(&options.doctor, cli_now()?);
+        let doctor_options = doctor_command_options(&options.paths);
+        let report = read_doctor_report(&doctor_options, cli_now()?);
         format_doctor_report(&report, options.json)
     })();
 
     cli_result_from_string(result)
 }
 
-fn run_stat(args: &[String]) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(STAT_HELP);
-    }
-
-    let result = (|| run_stat_command_from_args(args, STAT_HELP, cli_now()?))();
-    cli_result_from_string(result)
-}
-
-fn run_cycle(args: &[String]) -> CliResult {
-    match args.first().map(String::as_str) {
-        None | Some("-h") | Some("--help") => CliResult::success(CYCLE_HELP),
-        Some("add") => run_cycle_leaf(&args[1..], CYCLE_ADD_HELP, run_cycle_add_from_args),
-        Some("list") => run_cycle_leaf(&args[1..], CYCLE_LIST_HELP, run_cycle_list_from_args),
-        Some("remove") => run_cycle_leaf(&args[1..], CYCLE_REMOVE_HELP, run_cycle_remove_from_args),
-        Some("current") => {
-            run_cycle_leaf(&args[1..], CYCLE_CURRENT_HELP, run_cycle_current_from_args)
-        }
-        Some("history") => {
-            run_cycle_leaf(&args[1..], CYCLE_HISTORY_HELP, run_cycle_history_from_args)
-        }
-        Some(command) => CliResult::error(format!(
-            "error: Unknown cycle command: {command}\n\n{CYCLE_HELP}"
-        )),
-    }
-}
-
-fn run_cycle_leaf(
-    args: &[String],
-    help: &str,
-    handler: fn(&[String], &str, DateTime<Utc>) -> Result<String, AppError>,
-) -> CliResult {
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        return CliResult::success(help);
-    }
-
+fn run_stat(command: StatCliCommand) -> CliResult {
     let result = (|| {
-        let now = cli_now()?;
-        handler(args, help, now)
+        run_stat_command(
+            command.view.as_deref(),
+            command.session.as_deref(),
+            command.options,
+            cli_now()?,
+        )
     })();
     cli_result_from_string(result)
 }
 
-#[derive(Default)]
-struct AuthCliOptions {
-    auth: AuthCommandOptions,
-    json: bool,
-    include_token_claims: bool,
-    account_id: Option<String>,
-    yes: bool,
-}
-
-#[derive(Default)]
-struct DoctorCliOptions {
-    doctor: DoctorOptions,
-    json: bool,
-}
-
-fn parse_auth_cli_options(args: &[String], help: &str) -> Result<AuthCliOptions, AppError> {
-    let mut options = AuthCliOptions::default();
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--auth-file" => {
-                options.auth.auth_file = Some(read_path_value(args, &mut index, "--auth-file")?);
+fn run_cycle(command: CycleCliCommand) -> CliResult {
+    let result = (|| {
+        let now = cli_now()?;
+        match command {
+            CycleCliCommand::Add {
+                time_parts,
+                options,
+            } => run_cycle_add(&time_parts, options, now),
+            CycleCliCommand::List { options } => run_cycle_list(options, now),
+            CycleCliCommand::Remove { anchor_id, options } => {
+                run_cycle_remove(&anchor_id, options, now)
             }
-            "--codex-home" => {
-                options.auth.codex_home =
-                    Some(read_raw_path_value(args, &mut index, "--codex-home")?);
-            }
-            "--store-dir" => {
-                options.auth.store_dir = Some(read_path_value(args, &mut index, "--store-dir")?);
-            }
-            "--account-history-file" => {
-                options.auth.account_history_file =
-                    Some(read_path_value(args, &mut index, "--account-history-file")?);
-            }
-            "-A" | "--account-id" => {
-                options.account_id = Some(read_string_value(args, &mut index, "--account-id")?);
-            }
-            "-j" | "--json" => options.json = true,
-            "--include-token-claims" => options.include_token_claims = true,
-            "-y" | "--yes" => options.yes = true,
-            unknown if unknown.starts_with('-') => {
-                return Err(AppError::invalid_input(format!(
-                    "error: Unknown option: {unknown}\n\n{help}"
-                )));
-            }
-            unexpected => {
-                return Err(AppError::invalid_input(format!(
-                    "error: Unexpected argument: {unexpected}\n\n{help}"
-                )));
+            CycleCliCommand::Current { options } => run_cycle_current(options, now),
+            CycleCliCommand::History { cycle_id, options } => {
+                run_cycle_history(cycle_id, options, now)
             }
         }
-
-        index += 1;
-    }
-
-    Ok(options)
+    })();
+    cli_result_from_string(result)
 }
 
-fn parse_doctor_cli_options(args: &[String], help: &str) -> Result<DoctorCliOptions, AppError> {
-    let mut options = DoctorCliOptions::default();
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--auth-file" => {
-                options.doctor.auth_file = Some(read_path_value(args, &mut index, "--auth-file")?);
-            }
-            "--codex-home" => {
-                options.doctor.codex_home =
-                    Some(read_raw_path_value(args, &mut index, "--codex-home")?);
-            }
-            "--sessions-dir" => {
-                options.doctor.sessions_dir =
-                    Some(read_raw_path_value(args, &mut index, "--sessions-dir")?);
-            }
-            "--cycle-file" => {
-                options.doctor.cycle_file =
-                    Some(read_path_value(args, &mut index, "--cycle-file")?);
-            }
-            "-j" | "--json" => options.json = true,
-            unknown if unknown.starts_with('-') => {
-                return Err(AppError::invalid_input(format!(
-                    "error: Unknown option: {unknown}\n\n{help}"
-                )));
-            }
-            unexpected => {
-                return Err(AppError::invalid_input(format!(
-                    "error: Unexpected argument: {unexpected}\n\n{help}"
-                )));
-            }
-        }
-
-        index += 1;
-    }
-
-    Ok(options)
-}
-
-fn read_string_value(args: &[String], index: &mut usize, name: &str) -> Result<String, AppError> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .filter(|value| !value.starts_with("--"))
-        .ok_or_else(|| AppError::invalid_input(format!("error: Missing value for {name}")))
-}
-
-fn read_path_value(args: &[String], index: &mut usize, name: &str) -> Result<PathBuf, AppError> {
-    let value = read_string_value(args, index, name)?;
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|error| AppError::new(error.to_string()))
+fn auth_command_options(paths: &AuthCliPaths) -> AuthCommandOptions {
+    AuthCommandOptions {
+        auth_file: paths.auth_file.clone(),
+        codex_home: paths.codex_home.clone(),
+        store_dir: paths.store_dir.clone(),
+        account_history_file: paths.account_history_file.clone(),
     }
 }
 
-fn read_raw_path_value(
-    args: &[String],
-    index: &mut usize,
-    name: &str,
-) -> Result<PathBuf, AppError> {
-    Ok(PathBuf::from(read_string_value(args, index, name)?))
+fn doctor_command_options(paths: &DoctorCliPaths) -> DoctorOptions {
+    DoctorOptions {
+        auth_file: paths.auth_file.clone(),
+        codex_home: paths.codex_home.clone(),
+        sessions_dir: paths.sessions_dir.clone(),
+        cycle_file: paths.cycle_file.clone(),
+    }
 }
 
 fn cli_now() -> Result<DateTime<Utc>, AppError> {
@@ -708,6 +475,289 @@ mod tests {
         let result = run_cli(["missing"]);
 
         assert_eq!(result.code, 2);
-        assert!(result.stderr.contains("Unknown command: missing"));
+        assert!(result.stderr.contains("unrecognized subcommand 'missing'"));
+    }
+
+    #[test]
+    fn interactive_auth_select_switches_profile_and_writes_history() {
+        let fixture = AuthPromptFixture::new("select-switch");
+        let now = fixed_now();
+        let current_content = auth_content("account-a", "a@example.test", "plus");
+        let selected_content = auth_content("account-b", "b@example.test", "pro");
+
+        fixture.save_profile(&selected_content, now);
+        std::fs::write(&fixture.auth_file, &current_content).expect("write current auth");
+        let options = fixture.options();
+        let report = list_codex_auth_profiles(&options, now).expect("list profiles");
+        let mut prompt = FakePrompt {
+            select: Some(Some(0)),
+            ..FakePrompt::default()
+        };
+
+        let output =
+            select_auth_profile_interactively(&report, &options, now, &mut prompt).unwrap();
+
+        assert!(output.contains("Activated auth profile: b@example.test(account-b) - pro"));
+        assert_eq!(
+            std::fs::read_to_string(&fixture.auth_file).expect("read auth"),
+            selected_content
+        );
+        let history: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture.history_file).expect("read history"),
+        )
+        .expect("parse history");
+        assert_eq!(history["switches"][0]["fromAccountId"], "account-a");
+        assert_eq!(history["switches"][0]["toAccountId"], "account-b");
+        assert_eq!(
+            prompt.select_items[0],
+            vec!["b@example.test(account-b) - pro".to_string()]
+        );
+    }
+
+    #[test]
+    fn interactive_auth_select_cancel_has_no_side_effects() {
+        let fixture = AuthPromptFixture::new("select-cancel");
+        let now = fixed_now();
+        let current_content = auth_content("account-a", "a@example.test", "plus");
+        let selected_content = auth_content("account-b", "b@example.test", "pro");
+
+        fixture.save_profile(&selected_content, now);
+        std::fs::write(&fixture.auth_file, &current_content).expect("write current auth");
+        let options = fixture.options();
+        let report = list_codex_auth_profiles(&options, now).expect("list profiles");
+        let mut prompt = FakePrompt {
+            select: Some(None),
+            ..FakePrompt::default()
+        };
+
+        let error =
+            select_auth_profile_interactively(&report, &options, now, &mut prompt).unwrap_err();
+
+        assert_eq!(error.message(), "auth select cancelled.");
+        assert_eq!(
+            std::fs::read_to_string(&fixture.auth_file).expect("read auth"),
+            current_content
+        );
+        assert!(!fixture.history_file.exists());
+    }
+
+    #[test]
+    fn interactive_auth_remove_deletes_selected_profiles_but_not_current() {
+        let fixture = AuthPromptFixture::new("remove-selected");
+        let now = fixed_now();
+        let current_content = auth_content("account-a", "a@example.test", "plus");
+        let other_content = auth_content("account-b", "b@example.test", "pro");
+        let third_content = auth_content("account-c", "c@example.test", "team");
+
+        fixture.save_profile(&current_content, now);
+        fixture.save_profile(&other_content, now);
+        fixture.save_profile(&third_content, now);
+        std::fs::write(&fixture.auth_file, &current_content).expect("write current auth");
+        let options = fixture.options();
+        let report = list_codex_auth_profiles(&options, now).expect("list profiles");
+        let mut prompt = FakePrompt {
+            multi_select: Some(Some(vec![0])),
+            confirm: Some(Some(true)),
+            ..FakePrompt::default()
+        };
+
+        let output =
+            remove_auth_profiles_interactively(&report, &options, now, &mut prompt).unwrap();
+
+        assert!(output.contains("Removed auth profile: b@example.test(account-b) - pro"));
+        assert_eq!(
+            prompt.multi_select_items[0],
+            vec![
+                "b@example.test(account-b) - pro".to_string(),
+                "c@example.test(account-c) - team".to_string()
+            ]
+        );
+        assert!(fixture.profile_file("account-a").exists());
+        assert!(!fixture.profile_file("account-b").exists());
+        assert!(fixture.profile_file("account-c").exists());
+    }
+
+    #[test]
+    fn interactive_auth_remove_confirmation_reject_has_no_side_effects() {
+        let fixture = AuthPromptFixture::new("remove-cancel");
+        let now = fixed_now();
+        let current_content = auth_content("account-a", "a@example.test", "plus");
+        let other_content = auth_content("account-b", "b@example.test", "pro");
+
+        fixture.save_profile(&current_content, now);
+        fixture.save_profile(&other_content, now);
+        std::fs::write(&fixture.auth_file, &current_content).expect("write current auth");
+        let options = fixture.options();
+        let report = list_codex_auth_profiles(&options, now).expect("list profiles");
+        let mut prompt = FakePrompt {
+            multi_select: Some(Some(vec![0])),
+            confirm: Some(Some(false)),
+            ..FakePrompt::default()
+        };
+
+        let error =
+            remove_auth_profiles_interactively(&report, &options, now, &mut prompt).unwrap_err();
+
+        assert_eq!(error.message(), "auth remove cancelled.");
+        assert!(fixture.profile_file("account-a").exists());
+        assert!(fixture.profile_file("account-b").exists());
+    }
+
+    #[derive(Default)]
+    struct FakePrompt {
+        select: Option<Option<usize>>,
+        multi_select: Option<Option<Vec<usize>>>,
+        confirm: Option<Option<bool>>,
+        select_items: Vec<Vec<String>>,
+        multi_select_items: Vec<Vec<String>>,
+    }
+
+    impl Prompt for FakePrompt {
+        fn select(&mut self, _prompt: &str, items: &[String]) -> Result<Option<usize>, AppError> {
+            self.select_items.push(items.to_vec());
+            self.select
+                .take()
+                .ok_or_else(|| AppError::new("missing fake select response"))
+        }
+
+        fn multi_select(
+            &mut self,
+            _prompt: &str,
+            items: &[String],
+        ) -> Result<Option<Vec<usize>>, AppError> {
+            self.multi_select_items.push(items.to_vec());
+            self.multi_select
+                .take()
+                .ok_or_else(|| AppError::new("missing fake multi-select response"))
+        }
+
+        fn confirm(&mut self, _prompt: &str, _default: bool) -> Result<Option<bool>, AppError> {
+            self.confirm
+                .take()
+                .ok_or_else(|| AppError::new("missing fake confirm response"))
+        }
+    }
+
+    struct AuthPromptFixture {
+        root: std::path::PathBuf,
+        auth_file: std::path::PathBuf,
+        store_dir: std::path::PathBuf,
+        history_file: std::path::PathBuf,
+    }
+
+    impl AuthPromptFixture {
+        fn new(label: &str) -> Self {
+            let root = temp_dir(&format!("codex-ops-auth-{label}"));
+            std::fs::create_dir_all(&root).expect("create auth fixture root");
+            Self {
+                auth_file: root.join("auth.json"),
+                store_dir: root.join("auth-profiles"),
+                history_file: root.join("auth-account-history.json"),
+                root,
+            }
+        }
+
+        fn options(&self) -> AuthCommandOptions {
+            AuthCommandOptions {
+                auth_file: Some(self.auth_file.clone()),
+                store_dir: Some(self.store_dir.clone()),
+                account_history_file: Some(self.history_file.clone()),
+                ..AuthCommandOptions::default()
+            }
+        }
+
+        fn save_profile(&self, content: &str, now: DateTime<Utc>) {
+            std::fs::write(&self.auth_file, content).expect("write auth profile content");
+            save_current_codex_auth_profile(
+                &AuthCommandOptions {
+                    auth_file: Some(self.auth_file.clone()),
+                    store_dir: Some(self.store_dir.clone()),
+                    ..AuthCommandOptions::default()
+                },
+                now,
+            )
+            .expect("save auth profile");
+        }
+
+        fn profile_file(&self, account_id: &str) -> std::path::PathBuf {
+            self.store_dir.join(format!("{account_id}.json"))
+        }
+    }
+
+    impl Drop for AuthPromptFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-05-13T00:00:00.000Z")
+            .expect("fixed now")
+            .with_timezone(&Utc)
+    }
+
+    fn auth_content(account_id: &str, email: &str, plan: &str) -> String {
+        let payload = serde_json::json!({
+            "sub": format!("auth0|{account_id}"),
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+                "chatgpt_plan_type": plan,
+                "chatgpt_user_id": format!("user-{account_id}"),
+                "user_id": format!("user-{account_id}")
+            }
+        });
+        let token = jwt(r#"{"alg":"RS256","kid":"key-1"}"#, &payload.to_string());
+        serde_json::to_string_pretty(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": token,
+                "refresh_token": "synthetic-refresh-token",
+                "account_id": account_id
+            },
+            "last_refresh": "2026-05-12T05:32:41.917677755Z"
+        }))
+        .expect("serialize auth content")
+    }
+
+    fn jwt(header: &str, payload: &str) -> String {
+        format!(
+            "{}.{}.signature",
+            encode_base64url(header),
+            encode_base64url(payload)
+        )
+    }
+
+    fn encode_base64url(value: &str) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let bytes = value.as_bytes();
+        let mut output = String::new();
+        let mut index = 0;
+
+        while index < bytes.len() {
+            let b0 = bytes[index];
+            let b1 = *bytes.get(index + 1).unwrap_or(&0);
+            let b2 = *bytes.get(index + 2).unwrap_or(&0);
+            output.push(TABLE[(b0 >> 2) as usize] as char);
+            output.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            if index + 1 < bytes.len() {
+                output.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+            }
+            if index + 2 < bytes.len() {
+                output.push(TABLE[(b2 & 0x3f) as usize] as char);
+            }
+            index += 3;
+        }
+
+        output
+    }
+
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_millis();
+        std::env::temp_dir().join(format!("{prefix}-{millis}-{}", std::process::id()))
     }
 }

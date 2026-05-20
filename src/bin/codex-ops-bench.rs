@@ -433,7 +433,7 @@ impl TimingStats {
         values.sort_by(|left, right| left.total_cmp(right));
         let sum: f64 = values.iter().sum();
         let middle = values.len() / 2;
-        let median_ms = if values.len() % 2 == 0 {
+        let median_ms = if values.len().is_multiple_of(2) {
             (values[middle - 1] + values[middle]) / 2.0
         } else {
             values[middle]

@@ -3,13 +3,19 @@
 // propagation, and install-error behavior; CLI behavior belongs in Rust tests.
 
 import { spawnSync } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, closeSync, constants, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const shimPath = join(repoRoot, "bin", "codex-ops.js");
 const binaryName = process.platform === "win32" ? "codex-ops.exe" : "codex-ops";
+const shimTestEnvNames = [
+  "CODEX_OPS_SHIM_TEST_PLATFORM",
+  "CODEX_OPS_SHIM_TEST_ARCH",
+  "CODEX_OPS_SHIM_TEST_LIBC"
+];
 const rustBinary = resolve(
   repoRoot,
   process.env.CODEX_OPS_RUST_BINARY ?? join("target", "release", binaryName)
@@ -40,7 +46,7 @@ const cases = [
     name: "nonzero exit code",
     args: ["__codex_ops_unknown__"],
     expectedStatus: 2,
-    stderrIncludes: "error: Unknown command: __codex_ops_unknown__"
+    stderrIncludes: "error: unrecognized subcommand '__codex_ops_unknown__'"
   },
   {
     name: "missing binary",
@@ -50,19 +56,29 @@ const cases = [
     },
     expectedStatus: 127,
     stderrIncludes: "codex-ops: unable to find the Rust binary."
+  },
+  {
+    name: "unsupported linux musl",
+    args: ["--help"],
+    skipRustBinaryOverride: true,
+    env: {
+      CODEX_OPS_SHIM_TEST_PLATFORM: "linux",
+      CODEX_OPS_SHIM_TEST_ARCH: "x64",
+      CODEX_OPS_SHIM_TEST_LIBC: "musl"
+    },
+    expectedStatus: 1,
+    stderrIncludes: [
+      "codex-ops: unsupported platform for the bundled Rust binary.",
+      "target: linux-x64-musl",
+      "Alpine/musl Linux is not supported",
+      "linux-x64-gnu",
+      "linux-arm64-gnu"
+    ]
   }
 ];
 
 for (const testCase of cases) {
-  const result = spawnSync(process.execPath, [shimPath, ...testCase.args], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      CODEX_OPS_RUST_BINARY: rustBinary,
-      ...testCase.env
-    },
-    encoding: "utf8"
-  });
+  const result = runShim(testCase);
 
   assertEqual(result.status, testCase.expectedStatus, `${testCase.name} exit status`, result);
 
@@ -71,7 +87,9 @@ for (const testCase of cases) {
   }
 
   if (testCase.stderrIncludes !== undefined) {
-    assertIncludes(result.stderr, testCase.stderrIncludes, `${testCase.name} stderr`, result);
+    for (const expected of arrayOf(testCase.stderrIncludes)) {
+      assertIncludes(result.stderr, expected, `${testCase.name} stderr`, result);
+    }
   }
 }
 
@@ -91,6 +109,66 @@ function assertIncludes(actual, expected, label, result) {
   }
 
   fail(`${label}: expected to include ${JSON.stringify(expected)}`, result);
+}
+
+function arrayOf(value) {
+  return Array.isArray(value) ? value : [value];
+}
+
+function runShim(testCase) {
+  const tempDir = mkdtempSync(join(tmpdir(), "codex-ops-shim-smoke-"));
+  const stdoutPath = join(tempDir, "stdout");
+  const stderrPath = join(tempDir, "stderr");
+  const stdoutFd = openSync(stdoutPath, "w");
+  const stderrFd = openSync(stderrPath, "w");
+
+  try {
+    const result = spawnSync(process.execPath, [shimPath, ...testCase.args], {
+      cwd: repoRoot,
+      env: testEnv(testCase),
+      stdio: ["ignore", stdoutFd, stderrFd]
+    });
+
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+
+    return {
+      ...result,
+      stdout: readFileSync(stdoutPath, "utf8"),
+      stderr: readFileSync(stderrPath, "utf8")
+    };
+  } finally {
+    try {
+      closeSync(stdoutFd);
+    } catch {
+      // Already closed.
+    }
+    try {
+      closeSync(stderrFd);
+    } catch {
+      // Already closed.
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function testEnv(testCase) {
+  const env = { ...process.env };
+
+  for (const name of shimTestEnvNames) {
+    delete env[name];
+  }
+
+  if (!testCase.skipRustBinaryOverride) {
+    env.CODEX_OPS_RUST_BINARY = rustBinary;
+  } else {
+    delete env.CODEX_OPS_RUST_BINARY;
+  }
+
+  return {
+    ...env,
+    ...testCase.env
+  };
 }
 
 function fail(message, result) {

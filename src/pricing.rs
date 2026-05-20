@@ -1,3 +1,7 @@
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -33,78 +37,39 @@ pub struct CreditCost {
     pub credits: f64,
 }
 
-const MODEL_PRICING: &[ModelPricing] = &[
-    ModelPricing {
-        key: "gpt-5.5",
-        label: "GPT-5.5",
-        input_credits_per_million: 125.0,
-        cached_input_credits_per_million: 12.5,
-        output_credits_per_million: 750.0,
-        note: None,
-    },
-    ModelPricing {
-        key: "gpt-5.4",
-        label: "GPT-5.4",
-        input_credits_per_million: 62.5,
-        cached_input_credits_per_million: 6.25,
-        output_credits_per_million: 375.0,
-        note: None,
-    },
-    ModelPricing {
-        key: "gpt-5.4-mini",
-        label: "GPT-5.4-mini",
-        input_credits_per_million: 18.75,
-        cached_input_credits_per_million: 1.875,
-        output_credits_per_million: 113.0,
-        note: None,
-    },
-    ModelPricing {
-        key: "gpt-5.3-codex",
-        label: "GPT-5.3-Codex",
-        input_credits_per_million: 43.75,
-        cached_input_credits_per_million: 4.375,
-        output_credits_per_million: 350.0,
-        note: None,
-    },
-    ModelPricing {
-        key: "gpt-5.2",
-        label: "GPT-5.2",
-        input_credits_per_million: 43.75,
-        cached_input_credits_per_million: 4.375,
-        output_credits_per_million: 350.0,
-        note: None,
-    },
-    ModelPricing {
-        key: "gpt-5.3-codex-spark",
-        label: "GPT-5.3-Codex-Spark",
-        input_credits_per_million: 0.0,
-        cached_input_credits_per_million: 0.0,
-        output_credits_per_million: 0.0,
-        note: Some("research preview; charged at 0 credits"),
-    },
-    ModelPricing {
-        key: "gpt-image-2 (image)",
-        label: "GPT-Image-2 (image)",
-        input_credits_per_million: 200.0,
-        cached_input_credits_per_million: 50.0,
-        output_credits_per_million: 750.0,
-        note: None,
-    },
-    ModelPricing {
-        key: "gpt-image-2 (text)",
-        label: "GPT-Image-2 (text)",
-        input_credits_per_million: 125.0,
-        cached_input_credits_per_million: 31.25,
-        output_credits_per_million: 250.0,
-        note: None,
-    },
-];
+const RATE_CARD_JSON: &str = include_str!("../data/codex-rate-card.json");
 
-pub const CODEX_RATE_CARD_SOURCE: RateCardSource = RateCardSource {
-    name: "OpenAI Help Center Codex rate card",
-    checked_at: "2026-05-13",
-    credit_to_usd: "25 credits = $1",
-};
+static RATE_CARD: LazyLock<RateCard> = LazyLock::new(load_rate_card);
+pub static CODEX_RATE_CARD_SOURCE: LazyLock<RateCardSource> = LazyLock::new(|| rate_card().source);
+
+#[derive(Debug, Clone)]
+struct RateCard {
+    source: RateCardSource,
+    models: Vec<ModelPricing>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRateCard {
+    source: RawRateCardSource,
+    models: Vec<RawModelPricing>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRateCardSource {
+    name: String,
+    checked_at: String,
+    credit_to_usd: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModelPricing {
+    key: String,
+    label: String,
+    input_credits_per_million: f64,
+    cached_input_credits_per_million: f64,
+    output_credits_per_million: f64,
+    note: Option<String>,
+}
 
 pub fn normalize_model_name(model: &str) -> String {
     model
@@ -139,14 +104,15 @@ pub fn pricing_key_for_model(model: &str) -> String {
 
 pub fn get_model_pricing(model: &str) -> Option<ModelPricing> {
     let key = pricing_key_for_model(model);
-    MODEL_PRICING
+    rate_card()
+        .models
         .iter()
         .copied()
         .find(|pricing| pricing.key == key)
 }
 
 pub fn list_model_pricing() -> Vec<ModelPricing> {
-    let mut pricing = MODEL_PRICING.to_vec();
+    let mut pricing = rate_card().models.clone();
     pricing.sort_by(|left, right| left.key.cmp(right.key));
     pricing
 }
@@ -183,6 +149,87 @@ pub fn calculate_credit_cost(model: &str, usage: TokenUsage) -> CreditCost {
             credits: 0.0,
         },
     }
+}
+
+fn rate_card() -> &'static RateCard {
+    &RATE_CARD
+}
+
+fn load_rate_card() -> RateCard {
+    let raw: RawRateCard = serde_json::from_str(RATE_CARD_JSON).unwrap_or_else(|error| {
+        panic!("Failed to parse data/codex-rate-card.json: {error}");
+    });
+    validate_rate_card(&raw);
+
+    RateCard {
+        source: RateCardSource {
+            name: leak_str(raw.source.name),
+            checked_at: leak_str(raw.source.checked_at),
+            credit_to_usd: leak_str(raw.source.credit_to_usd),
+        },
+        models: raw
+            .models
+            .into_iter()
+            .map(|model| ModelPricing {
+                key: leak_str(model.key),
+                label: leak_str(model.label),
+                input_credits_per_million: model.input_credits_per_million,
+                cached_input_credits_per_million: model.cached_input_credits_per_million,
+                output_credits_per_million: model.output_credits_per_million,
+                note: model.note.map(leak_str),
+            })
+            .collect(),
+    }
+}
+
+fn validate_rate_card(raw: &RawRateCard) {
+    assert_non_empty(&raw.source.name, "source.name");
+    assert_non_empty(&raw.source.checked_at, "source.checked_at");
+    assert_non_empty(&raw.source.credit_to_usd, "source.credit_to_usd");
+
+    if raw.models.is_empty() {
+        panic!("data/codex-rate-card.json must define at least one model");
+    }
+
+    let mut keys = HashSet::new();
+    for model in &raw.models {
+        assert_non_empty(&model.key, "models[].key");
+        assert_non_empty(&model.label, "models[].label");
+        if !keys.insert(model.key.as_str()) {
+            panic!(
+                "data/codex-rate-card.json has duplicate model key: {}",
+                model.key
+            );
+        }
+        assert_non_negative_finite(
+            model.input_credits_per_million,
+            "models[].input_credits_per_million",
+        );
+        assert_non_negative_finite(
+            model.cached_input_credits_per_million,
+            "models[].cached_input_credits_per_million",
+        );
+        assert_non_negative_finite(
+            model.output_credits_per_million,
+            "models[].output_credits_per_million",
+        );
+    }
+}
+
+fn assert_non_empty(value: &str, path: &str) {
+    if value.trim().is_empty() {
+        panic!("data/codex-rate-card.json field {path} cannot be empty");
+    }
+}
+
+fn assert_non_negative_finite(value: f64, path: &str) {
+    if !value.is_finite() || value < 0.0 {
+        panic!("data/codex-rate-card.json field {path} must be finite and non-negative");
+    }
+}
+
+fn leak_str(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
 }
 
 #[cfg(test)]
@@ -263,5 +310,16 @@ mod tests {
 
         assert_eq!(keys.first(), Some(&"gpt-5.2"));
         assert!(keys.contains(&"gpt-5.5"));
+    }
+
+    #[test]
+    fn loads_source_metadata_from_static_rate_card() {
+        assert_eq!(
+            CODEX_RATE_CARD_SOURCE.name,
+            "OpenAI Help Center Codex rate card"
+        );
+        assert_eq!(CODEX_RATE_CARD_SOURCE.checked_at, "2026-05-13");
+        assert_eq!(CODEX_RATE_CARD_SOURCE.credit_to_usd, "25 credits = $1");
+        assert_eq!(list_model_pricing().len(), 8);
     }
 }

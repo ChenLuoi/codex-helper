@@ -44,8 +44,8 @@ rtk npm run smoke:rust-cli
 ```
 
 Published npm installs support Node.js `>=20.12.0` for the shim. Local
-development requires a Rust stable toolchain; Node.js is only needed for npm
-shim, packaging, and release helper scripts.
+development requires a Rust stable toolchain; Node.js `>=20.12.0` is only
+needed for npm shim, packaging, and release helper scripts.
 
 ## Commands
 
@@ -129,7 +129,9 @@ attributed back to the active account. `--store-dir` only moves saved auth
 profiles; use `--account-history-file` if the account history itself should live
 somewhere else. `auth remove` shows an interactive multi-select list where Space
 toggles entries and Enter confirms the selection, then asks for a second
-confirmation before deleting persisted copies.
+confirmation before deleting persisted copies. The interactive remove list does
+not offer the currently active profile, and cancelling an interactive prompt
+leaves auth files, saved profiles, and account history unchanged.
 
 Options:
 
@@ -312,19 +314,24 @@ Credits are estimated from the token counters in each session. Cached input
 tokens are billed at the cached-input rate; regular input credits use
 `max(inputTokens - cachedInputTokens, 0)`. USD estimates use `25 credits = $1`.
 When a model has no configured price, it is excluded from Credits and listed in
-an unpriced-model breakdown with a stub you can fill into `src/pricing.rs`.
+an unpriced-model breakdown with a stub you can fill into
+`data/codex-rate-card.json`.
 JSON output includes the same information under `unpricedModels`.
 
-| Model | Input / 1M | Cached input / 1M | Output / 1M |
-| --- | ---: | ---: | ---: |
-| GPT-5.5 | 125 credits | 12.50 credits | 750 credits |
-| GPT-5.4 | 62.50 credits | 6.250 credits | 375 credits |
-| GPT-5.4-mini | 18.75 credits | 1.875 credits | 113 credits |
-| GPT-5.3-Codex | 43.75 credits | 4.375 credits | 350 credits |
-| GPT-5.2 | 43.75 credits | 4.375 credits | 350 credits |
-| GPT-5.3-Codex-Spark | research preview | research preview | research preview |
-| GPT-Image-2 (image) | 200 credits | 50 credits | 750 credits |
-| GPT-Image-2 (text) | 125 credits | 31.25 credits | 250 credits |
+Pricing data is statically embedded from `data/codex-rate-card.json`. The
+current snapshot source is OpenAI Help Center Codex rate card, checked
+2026-05-13.
+
+| Model | Input / 1M | Cached input / 1M | Output / 1M | Note |
+| --- | ---: | ---: | ---: | --- |
+| GPT-5.5 | 125 credits | 12.50 credits | 750 credits |  |
+| GPT-5.4 | 62.50 credits | 6.250 credits | 375 credits |  |
+| GPT-5.4-mini | 18.75 credits | 1.875 credits | 113 credits |  |
+| GPT-5.3-Codex | 43.75 credits | 4.375 credits | 350 credits |  |
+| GPT-5.2 | 43.75 credits | 4.375 credits | 350 credits |  |
+| GPT-5.3-Codex-Spark | 0 credits | 0 credits | 0 credits | research preview; charged at 0 credits |
+| GPT-Image-2 (image) | 200 credits | 50 credits | 750 credits |  |
+| GPT-Image-2 (text) | 125 credits | 31.25 credits | 250 credits |  |
 
 ## Development
 
@@ -370,15 +377,18 @@ or Rust helper binaries.
 src/main.rs                      Rust CLI process entry
 src/lib.rs                       Rust command parsing and dispatch
 src/*.rs                         Rust business modules
-src/bin/codex-ops-stat-poc.rs    Benchmark/development helper binary
-src/bin/codex-ops-session-scale.rs
-src/bin/codex-ops-bench.rs       Rust benchmark smoke helper
+src/bin/codex-ops-bench.rs       Local Rust benchmark smoke helper
 bin/codex-ops.js                 npm shim entrypoint
 npm/<target>/package.json        npm platform package manifests
 justfile                         local command orchestration
 scripts/*.mjs                    npm shim/release helpers
 test/fixtures/rust-run/          synthetic fixture data only
 ```
+
+The published Cargo crate exposes only the `codex-ops` binary. Local helper
+binaries, npm packaging assets, CI configuration, task documents, and synthetic
+fixtures are excluded from the crate package; they remain repository-only
+development assets.
 
 ## Release
 
@@ -391,6 +401,11 @@ darwin-x64
 darwin-arm64
 win32-x64-msvc
 ```
+
+Supported Linux npm packages require GNU/glibc. Alpine Linux and other
+Linux musl targets are not currently supported; the npm shim exits with an
+explicit unsupported-platform error instead of searching for a missing musl
+package.
 
 Each artifact contains the Rust binary, `manifest.json`, and `SHA256SUMS`. The
 main npm package depends on platform packages named `codex-ops-<target>` through

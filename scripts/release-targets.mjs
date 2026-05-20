@@ -46,6 +46,20 @@ export const releaseTargets = [
   }
 ];
 
+export const expectedReleaseTargetNames = [
+  "linux-x64-gnu",
+  "linux-arm64-gnu",
+  "darwin-x64",
+  "darwin-arm64",
+  "win32-x64-msvc"
+];
+
+export const unsupportedRuntimeTargets = [
+  "linux-x64-musl",
+  "linux-arm64-musl",
+  "win32-arm64-msvc"
+];
+
 export function targetByName(targetName) {
   const target = releaseTargets.find((entry) => entry.target === targetName);
 
@@ -61,7 +75,16 @@ export function currentReleaseTarget() {
   const arch = process.arch;
 
   if (platform === "linux") {
-    return targetByName(`linux-${arch}-${detectLinuxLibc()}`);
+    const libc = detectLinuxLibc();
+    const target = `linux-${arch}-${libc}`;
+
+    if (libc === "musl") {
+      throw new Error(
+        `Unsupported release target: ${target}. Alpine/musl is not supported; supported Linux targets are linux-x64-gnu and linux-arm64-gnu.`
+      );
+    }
+
+    return targetByName(target);
   }
 
   if (platform === "darwin") {
@@ -69,7 +92,15 @@ export function currentReleaseTarget() {
   }
 
   if (platform === "win32") {
-    return targetByName(`win32-${arch}-msvc`);
+    const target = `win32-${arch}-msvc`;
+
+    if (arch === "arm64") {
+      throw new Error(
+        `Unsupported release target: ${target}. Supported Windows target is win32-x64-msvc.`
+      );
+    }
+
+    return targetByName(target);
   }
 
   throw new Error(`Unsupported release target: ${platform}-${arch}`);

@@ -9,6 +9,9 @@ import { fileURLToPath } from "node:url";
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const requireFromPackage = createRequire(import.meta.url);
 const overrideEnv = "CODEX_OPS_RUST_BINARY";
+const platformOverrideEnv = "CODEX_OPS_SHIM_TEST_PLATFORM";
+const archOverrideEnv = "CODEX_OPS_SHIM_TEST_ARCH";
+const libcOverrideEnv = "CODEX_OPS_SHIM_TEST_LIBC";
 const binaryName = process.platform === "win32" ? "codex-ops.exe" : "codex-ops";
 const forwardedSignals = ["SIGHUP", "SIGINT", "SIGTERM"];
 
@@ -95,7 +98,7 @@ function findBinary() {
       ok: false,
       kind: "unsupported",
       exitCode: 1,
-      target: describeCurrentPlatform(),
+      target: target.target ?? describeCurrentPlatform(),
       candidates: [],
       optionalPackages: [],
       reason: target.reason
@@ -162,7 +165,7 @@ function optionalPackageNames(target) {
 }
 
 function resolveTarget() {
-  const { arch, platform } = process;
+  const { arch, libc, platform } = currentPlatform();
 
   if (platform === "darwin") {
     if (arch === "x64" || arch === "arm64") {
@@ -173,14 +176,37 @@ function resolveTarget() {
 
   if (platform === "linux") {
     if (arch === "x64" || arch === "arm64") {
-      return { ok: true, value: `linux-${arch}-${detectLinuxLibc()}` };
+      const target = `linux-${arch}-${libc}`;
+
+      if (libc === "gnu") {
+        return { ok: true, value: target };
+      }
+
+      if (libc === "musl") {
+        return {
+          ok: false,
+          target,
+          reason:
+            "Alpine/musl Linux is not supported by codex-ops npm packages. Supported Linux targets are linux-x64-gnu and linux-arm64-gnu (glibc)."
+        };
+      }
+
+      return { ok: false, target, reason: `unsupported Linux libc: ${libc}` };
     }
     return { ok: false, reason: `unsupported Linux architecture: ${arch}` };
   }
 
   if (platform === "win32") {
-    if (arch === "x64" || arch === "arm64") {
-      return { ok: true, value: `win32-${arch}-msvc` };
+    if (arch === "x64") {
+      return { ok: true, value: "win32-x64-msvc" };
+    }
+
+    if (arch === "arm64") {
+      return {
+        ok: false,
+        target: "win32-arm64-msvc",
+        reason: "Windows arm64 is not supported by codex-ops npm packages. Supported Windows target is win32-x64-msvc."
+      };
     }
     return { ok: false, reason: `unsupported Windows architecture: ${arch}` };
   }
@@ -199,6 +225,13 @@ function detectLinuxLibc() {
   }
 
   return "musl";
+}
+
+function currentPlatform() {
+  const platform = process.env[platformOverrideEnv] || process.platform;
+  const arch = process.env[archOverrideEnv] || process.arch;
+  const libc = platform === "linux" ? process.env[libcOverrideEnv] || detectLinuxLibc() : undefined;
+  return { platform, arch, libc };
 }
 
 function checkExecutable(path) {
@@ -302,9 +335,11 @@ function removeSignalHandlers() {
 }
 
 function describeCurrentPlatform() {
-  if (process.platform === "linux") {
-    return `linux-${process.arch}-${detectLinuxLibc()}`;
+  const { arch, libc, platform } = currentPlatform();
+
+  if (platform === "linux") {
+    return `linux-${arch}-${libc}`;
   }
 
-  return `${process.platform}-${process.arch}`;
+  return `${platform}-${arch}`;
 }
