@@ -23,10 +23,21 @@ const cargoVersion = matchTomlString(cargoToml, "version");
 const cargoName = matchTomlString(cargoToml, "name");
 const cargoPublish = matchTomlValue(cargoToml, "publish");
 const cargoPackageFiles = readCargoPackageList();
+const npmProjectMetadata = {
+  homepage: "https://github.com/ChenLuoi/codex-ops#readme",
+  bugs: {
+    url: "https://github.com/ChenLuoi/codex-ops/issues"
+  },
+  repository: {
+    type: "git",
+    url: "git+https://github.com/ChenLuoi/codex-ops.git"
+  }
+};
 
 assertEqual(packageJson.name, "codex-ops", "package name");
 assertEqual(cargoName, "codex-ops", "Cargo package name");
 assertEqual(packageJson.version, cargoVersion, "package/Cargo version");
+assertNpmProjectMetadata(packageJson, "package");
 assertEqual(packageJson.bin?.["codex-ops"], "bin/codex-ops.js", "npm bin");
 assertEqual(
   packageJson.files,
@@ -96,6 +107,7 @@ for (const target of releaseTargets) {
   const manifest = readJson(join(repoRoot, "npm", target.target, "package.json"));
   assertEqual(manifest.name, target.packageName, `${target.target} package name`);
   assertEqual(manifest.version, packageJson.version, `${target.target} package version`);
+  assertNpmProjectMetadata(manifest, `${target.target} package`);
   assertEqual(manifest.os, target.os, `${target.target} os`);
   assertEqual(manifest.cpu, target.cpu, `${target.target} cpu`);
 
@@ -198,6 +210,12 @@ function assertEqual(actual, expected, label) {
 
 function assertJsonEqual(actual, expected, label) {
   assertEqual(actual, expected, label);
+}
+
+function assertNpmProjectMetadata(manifest, label) {
+  assertEqual(manifest.homepage, npmProjectMetadata.homepage, `${label} homepage`);
+  assertEqual(manifest.bugs, npmProjectMetadata.bugs, `${label} bugs`);
+  assertEqual(manifest.repository, npmProjectMetadata.repository, `${label} repository`);
 }
 
 function assertCargoPackageIncludes(files, expectedPaths) {

@@ -416,8 +416,7 @@ secrets.
 
 Before publishing, recheck npm platform package name availability, crates.io
 token access, GitHub `release` environment approval, the first release version,
-and whether a separate legacy `codex-helper` migration package or alias is
-needed.
+and whether any legacy migration package or alias is needed.
 
 ## Data Safety
 

@@ -2,6 +2,14 @@
   "name": "codex-ops",
   "version": "0.1.0",
   "description": "A local operations CLI for Codex auth, usage, and cycle workflows.",
+  "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
+  "bugs": {
+    "url": "https://github.com/ChenLuoi/codex-ops/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChenLuoi/codex-ops.git"
+  },
   "type": "module",
   "bin": {
     "codex-ops": "bin/codex-ops.js"
