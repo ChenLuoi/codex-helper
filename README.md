@@ -411,11 +411,11 @@ package for native performance, while musl Linux installs the static `*-musl`
 package for Alpine-style environments.
 
 Each artifact contains the Rust binary, `manifest.json`, and `SHA256SUMS`. The
-main npm package depends on platform packages named for the platform target
-through `optionalDependencies`. The release workflow validates Cargo/npm version
-synchronization and only publishes when manually triggered with the explicit
-publish confirmation and configured `CARGO_REGISTRY_TOKEN` / `NPM_TOKEN`
-secrets.
+main `codex-ops` npm package depends on scoped `@codexops/*` platform
+packages through `optionalDependencies`. The release workflow validates
+Cargo/npm version synchronization and only publishes when manually triggered
+with the explicit publish confirmation and configured `CARGO_REGISTRY_TOKEN` /
+`NPM_TOKEN` secrets.
 
 Before publishing, recheck npm platform package name availability, crates.io
 token access, GitHub `release` environment approval, the first release version,

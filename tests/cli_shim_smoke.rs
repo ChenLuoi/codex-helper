@@ -28,7 +28,7 @@ fn npm_shim_resolves_linux_glibc_to_gnu_package_target() {
     for expected in [
         "codex-ops: unable to find the Rust binary.",
         "target: linux-x64-gnu",
-        "codex-ops-linux-x64-gnu",
+        "@codexops/linux-x64-gnu",
     ] {
         assert!(
             stderr.contains(expected),
@@ -62,7 +62,7 @@ fn npm_shim_resolves_linux_musl_to_musl_package_target() {
     for expected in [
         "codex-ops: unable to find the Rust binary.",
         "target: linux-x64-musl",
-        "codex-ops-linux-x64-musl",
+        "@codexops/linux-x64-musl",
     ] {
         assert!(
             stderr.contains(expected),

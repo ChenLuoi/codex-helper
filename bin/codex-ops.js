@@ -162,13 +162,13 @@ function buildCandidates(target) {
 
 function optionalPackageNames(target) {
   const packageByTarget = {
-    "linux-x64-gnu": "codex-ops-linux-x64-gnu",
-    "linux-arm64-gnu": "codex-ops-linux-arm64-gnu",
-    "linux-x64-musl": "codex-ops-linux-x64-musl",
-    "linux-arm64-musl": "codex-ops-linux-arm64-musl",
-    "darwin-x64": "codex-ops-macos-x64-bin",
-    "darwin-arm64": "codex-ops-macos-arm64-bin",
-    "win32-x64-msvc": "codex-ops-windows-x64-bin"
+    "linux-x64-gnu": "@codexops/linux-x64-gnu",
+    "linux-arm64-gnu": "@codexops/linux-arm64-gnu",
+    "linux-x64-musl": "@codexops/linux-x64-musl",
+    "linux-arm64-musl": "@codexops/linux-arm64-musl",
+    "darwin-x64": "@codexops/darwin-x64",
+    "darwin-arm64": "@codexops/darwin-arm64",
+    "win32-x64-msvc": "@codexops/win32-x64-msvc"
   };
 
   return [packageByTarget[target]].filter(Boolean);

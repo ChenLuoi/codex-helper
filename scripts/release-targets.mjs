@@ -1,11 +1,13 @@
 // npm platform package target metadata used by release packaging helpers.
 // This file must not contain CLI business behavior or validation matrices.
 
+export const npmPlatformPackageScope = "@codexops";
+
 export const releaseTargets = [
   {
     target: "linux-x64-gnu",
     rustTarget: "x86_64-unknown-linux-gnu",
-    packageName: "codex-ops-linux-x64-gnu",
+    packageName: platformPackageName("linux-x64-gnu"),
     os: ["linux"],
     cpu: ["x64"],
     libc: ["glibc"],
@@ -14,7 +16,7 @@ export const releaseTargets = [
   {
     target: "linux-arm64-gnu",
     rustTarget: "aarch64-unknown-linux-gnu",
-    packageName: "codex-ops-linux-arm64-gnu",
+    packageName: platformPackageName("linux-arm64-gnu"),
     os: ["linux"],
     cpu: ["arm64"],
     libc: ["glibc"],
@@ -23,7 +25,7 @@ export const releaseTargets = [
   {
     target: "linux-x64-musl",
     rustTarget: "x86_64-unknown-linux-musl",
-    packageName: "codex-ops-linux-x64-musl",
+    packageName: platformPackageName("linux-x64-musl"),
     os: ["linux"],
     cpu: ["x64"],
     libc: ["musl"],
@@ -32,7 +34,7 @@ export const releaseTargets = [
   {
     target: "linux-arm64-musl",
     rustTarget: "aarch64-unknown-linux-musl",
-    packageName: "codex-ops-linux-arm64-musl",
+    packageName: platformPackageName("linux-arm64-musl"),
     os: ["linux"],
     cpu: ["arm64"],
     libc: ["musl"],
@@ -41,7 +43,7 @@ export const releaseTargets = [
   {
     target: "darwin-x64",
     rustTarget: "x86_64-apple-darwin",
-    packageName: "codex-ops-macos-x64-bin",
+    packageName: platformPackageName("darwin-x64"),
     os: ["darwin"],
     cpu: ["x64"],
     binaryName: "codex-ops"
@@ -49,7 +51,7 @@ export const releaseTargets = [
   {
     target: "darwin-arm64",
     rustTarget: "aarch64-apple-darwin",
-    packageName: "codex-ops-macos-arm64-bin",
+    packageName: platformPackageName("darwin-arm64"),
     os: ["darwin"],
     cpu: ["arm64"],
     binaryName: "codex-ops"
@@ -57,7 +59,7 @@ export const releaseTargets = [
   {
     target: "win32-x64-msvc",
     rustTarget: "x86_64-pc-windows-msvc",
-    packageName: "codex-ops-windows-x64-bin",
+    packageName: platformPackageName("win32-x64-msvc"),
     os: ["win32"],
     cpu: ["x64"],
     binaryName: "codex-ops.exe"
@@ -137,4 +139,16 @@ function detectLinuxLibc() {
 
 export function optionalDependencyMap(version) {
   return Object.fromEntries(releaseTargets.map((target) => [target.packageName, version]));
+}
+
+export function npmPackFileName(packageName, version) {
+  const tarballName = packageName.startsWith("@")
+    ? packageName.slice(1).split("/").join("-")
+    : packageName;
+
+  return `${tarballName}-${version}.tgz`;
+}
+
+function platformPackageName(packageName) {
+  return `${npmPlatformPackageScope}/${packageName}`;
 }

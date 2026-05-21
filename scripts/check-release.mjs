@@ -108,6 +108,7 @@ for (const target of releaseTargets) {
   assertEqual(manifest.name, target.packageName, `${target.target} package name`);
   assertEqual(manifest.version, packageJson.version, `${target.target} package version`);
   assertNpmProjectMetadata(manifest, `${target.target} package`);
+  assertEqual(manifest.publishConfig, { access: "public" }, `${target.target} publishConfig`);
   assertEqual(manifest.os, target.os, `${target.target} os`);
   assertEqual(manifest.cpu, target.cpu, `${target.target} cpu`);
 
