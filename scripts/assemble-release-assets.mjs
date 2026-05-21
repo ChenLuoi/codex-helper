@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // GitHub Release asset assembler. Keep this script limited to collecting the
-// already-built release artifacts, npm tarballs, crate archive, manifests, and
-// checksums into one upload directory.
+// already-built release binaries, release manifest, and checksums into one
+// upload directory. npm tarballs and crate archives stay as Actions artifacts
+// for registry publishing.
 
 import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -9,7 +10,7 @@ import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname as pathDirname } from "node:path";
-import { npmPackFileName, releaseTargets } from "./release-targets.mjs";
+import { releaseBinaryFileName, releaseTargets } from "./release-targets.mjs";
 
 const repoRoot = pathDirname(pathDirname(fileURLToPath(import.meta.url)));
 const packageJson = readJson(join(repoRoot, "package.json"));
@@ -26,20 +27,10 @@ const discovered = walk(inputDir);
 const assets = [];
 
 for (const target of releaseTargets) {
-  const archiveName = `codex-ops-${version}-${target.target}.tar.gz`;
-  const archivePath = copyRequiredFile(discovered, archiveName, outputDir);
-  assets.push(assetEntry("binary", archivePath, target));
-
-  const tarballName = npmPackFileName(target.packageName, version);
-  const tarballPath = copyRequiredFile(discovered, tarballName, outputDir);
-  assets.push(assetEntry("npm-platform", tarballPath, target));
+  const binaryName = releaseBinaryFileName(target, version);
+  const binaryPath = copyRequiredFile(discovered, binaryName, outputDir);
+  assets.push(assetEntry("binary", binaryPath, target));
 }
-
-const mainTarball = copyRequiredFile(discovered, `codex-ops-${version}.tgz`, outputDir);
-assets.push(assetEntry("npm-main", mainTarball));
-
-const crateArchive = copyRequiredFile(discovered, `codex-ops-${version}.crate`, outputDir);
-assets.push(assetEntry("crate", crateArchive));
 
 const releaseManifestPath = join(outputDir, "release-manifest.json");
 writeFileSync(

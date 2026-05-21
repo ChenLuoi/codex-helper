@@ -284,6 +284,10 @@ function printLookupError(result) {
     for (const packageName of result.optionalPackages) {
       lines.push(`  - ${packageName}`);
     }
+    lines.push(
+      "if this came from npx/npm exec, clear the stale _npx cache or retry with a fresh npm cache."
+    );
+    lines.push("also verify npm optional dependencies are enabled.");
   }
 
   lines.push(`set ${overrideEnv}=/path/to/codex-ops to run a local Rust build.`);

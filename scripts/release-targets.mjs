@@ -149,6 +149,11 @@ export function npmPackFileName(packageName, version) {
   return `${tarballName}-${version}.tgz`;
 }
 
+export function releaseBinaryFileName(target, version) {
+  const extension = target.binaryName.endsWith(".exe") ? ".exe" : "";
+  return `codex-ops-${version}-${target.target}${extension}`;
+}
+
 function platformPackageName(packageName) {
   return `${npmPlatformPackageScope}/${packageName}`;
 }

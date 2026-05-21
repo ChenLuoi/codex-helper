@@ -53,7 +53,7 @@ jobs:
         run: npm pack --dry-run
 
   pack-main:
-    name: Pack main npm and crate artifacts
+    name: Pack main npm package
     needs: validate
     runs-on: ubuntu-latest
 
@@ -77,24 +77,11 @@ jobs:
           mkdir -p dist/release/npm-tarballs
           npm pack --pack-destination dist/release/npm-tarballs
 
-      - name: Package crate archive
-        run: |
-          mkdir -p dist/release/cargo
-          cargo package --locked --registry crates-io
-          cp target/package/codex-ops-*.crate dist/release/cargo/
-
       - name: Upload main npm package
         uses: actions/upload-artifact@v4
         with:
           name: npm-main
           path: dist/release/npm-tarballs/*.tgz
-          if-no-files-found: error
-
-      - name: Upload crate archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: crate-package
-          path: dist/release/cargo/*.crate
           if-no-files-found: error
 
   build-artifacts:
@@ -204,11 +191,11 @@ jobs:
       - name: Pack npm platform package
         run: npm pack dist/release/npm/${{ matrix.npm_package }} --pack-destination dist/release/npm-tarballs
 
-      - name: Upload binary release archive
+      - name: Upload binary release asset
         uses: actions/upload-artifact@v4
         with:
           name: codex-ops-${{ matrix.platform_target }}
-          path: dist/release/binary-tarballs/*.tar.gz
+          path: dist/release/binary-assets/*
           if-no-files-found: error
 
       - name: Upload npm platform package
@@ -383,5 +370,15 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)"
+          release_id="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${tag}\") | .id" \
+              | head -n 1
+          )"
+
+          if [ -z "$release_id" ]; then
+            echo "::error::Unable to find GitHub Release for ${tag}"
+            exit 1
+          fi
+
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -f draft=false -f make_latest=true

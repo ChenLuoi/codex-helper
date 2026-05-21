@@ -69,7 +69,7 @@ run(installedBin, ["--help"], {
 });
 
 console.log(`release layout dry-run passed for ${target.target}`);
-console.log(`staged artifact: ${staged.artifactDir}`);
+console.log(`staged binary asset: ${staged.binaryAsset}`);
 console.log(`staged npm package: ${staged.npmPackageDir}`);
 
 function parseArgs(argv) {

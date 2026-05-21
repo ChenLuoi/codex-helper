@@ -1,6 +1,6 @@
 {
   "name": "@codexops/linux-arm64-musl",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Prebuilt static codex-ops Rust binary for Linux arm64 musl.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
   "bugs": {
