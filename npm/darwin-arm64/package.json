@@ -1,6 +1,6 @@
 {
   "name": "codex-ops-macos-arm64-bin",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Prebuilt codex-ops Rust binary for macOS arm64.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
   "bugs": {
