@@ -4,9 +4,6 @@ use crate::time::{local_to_utc, StatGroupBy};
 use chrono::{DateTime, Datelike, Local, SecondsFormat, Timelike, Utc};
 use serde::Serialize;
 
-const FULL_SCAN_ACCURACY_NOTE: &str =
-    "Note: This report used balanced scanning, not a full scan. It reads in-range files and checks a bounded lookback by last token_count timestamp. Use -F, --full-scan to check all pre-range rollout files for exact local token_count results.";
-
 #[derive(Debug, Clone)]
 pub struct UsageRecordsReadOptions {
     pub start: DateTime<Utc>,
@@ -135,6 +132,14 @@ pub struct UsageDiagnostics {
     pub read_files: i64,
     pub skipped_files: i64,
     pub prefiltered_files: i64,
+    pub tail_read_files: i64,
+    pub tail_read_hits: i64,
+    pub mtime_read_files: i64,
+    pub mtime_tail_hits: i64,
+    pub mtime_read_hits: i64,
+    pub fork_files: i64,
+    pub fork_parent_missing: i64,
+    pub fork_replay_lines: i64,
     pub read_lines: i64,
     pub invalid_json_lines: i64,
     pub token_count_events: i64,
@@ -151,6 +156,7 @@ pub struct SkippedEvents {
     pub empty_usage: i64,
     pub out_of_range: i64,
     pub account_mismatch: i64,
+    pub fork_replay: i64,
 }
 
 impl UsageDiagnostics {
@@ -162,6 +168,14 @@ impl UsageDiagnostics {
             read_files: 0,
             skipped_files: 0,
             prefiltered_files: 0,
+            tail_read_files: 0,
+            tail_read_hits: 0,
+            mtime_read_files: 0,
+            mtime_tail_hits: 0,
+            mtime_read_hits: 0,
+            fork_files: 0,
+            fork_parent_missing: 0,
+            fork_replay_lines: 0,
             read_lines: 0,
             invalid_json_lines: 0,
             token_count_events: 0,
@@ -173,6 +187,14 @@ impl UsageDiagnostics {
 
     pub(super) fn merge_file_scan(&mut self, other: &UsageDiagnostics) {
         self.prefiltered_files += other.prefiltered_files;
+        self.tail_read_files += other.tail_read_files;
+        self.tail_read_hits += other.tail_read_hits;
+        self.mtime_read_files += other.mtime_read_files;
+        self.mtime_tail_hits += other.mtime_tail_hits;
+        self.mtime_read_hits += other.mtime_read_hits;
+        self.fork_files += other.fork_files;
+        self.fork_parent_missing += other.fork_parent_missing;
+        self.fork_replay_lines += other.fork_replay_lines;
         self.read_lines += other.read_lines;
         self.invalid_json_lines += other.invalid_json_lines;
         self.token_count_events += other.token_count_events;
@@ -182,6 +204,7 @@ impl UsageDiagnostics {
         self.skipped_events.empty_usage += other.skipped_events.empty_usage;
         self.skipped_events.out_of_range += other.skipped_events.out_of_range;
         self.skipped_events.account_mismatch += other.skipped_events.account_mismatch;
+        self.skipped_events.fork_replay += other.skipped_events.fork_replay;
     }
 }
 
@@ -457,24 +480,11 @@ fn to_session_event_row_json(row: &UsageSessionEventRow) -> UsageSessionEventRow
 }
 
 pub(super) fn usage_warnings(
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    diagnostics: Option<&UsageDiagnostics>,
+    _start: DateTime<Utc>,
+    _end: DateTime<Utc>,
+    _diagnostics: Option<&UsageDiagnostics>,
 ) -> Vec<String> {
-    if should_suggest_full_scan(start, end, diagnostics) {
-        vec![FULL_SCAN_ACCURACY_NOTE.to_string()]
-    } else {
-        Vec::new()
-    }
-}
-
-pub(super) fn should_suggest_full_scan(
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    diagnostics: Option<&UsageDiagnostics>,
-) -> bool {
-    diagnostics
-        .is_some_and(|diagnostics| !diagnostics.scan_all_files && !is_all_usage_range(start, end))
+    Vec::new()
 }
 
 pub(super) fn is_all_usage_range(start: DateTime<Utc>, end: DateTime<Utc>) -> bool {
