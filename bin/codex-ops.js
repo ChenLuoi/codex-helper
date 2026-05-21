@@ -162,18 +162,20 @@ function buildCandidates(target) {
 
 function optionalPackageNames(target) {
   const packageByTarget = {
-    "linux-x64": "codex-ops-linux-x64-bin",
-    "linux-arm64": "codex-ops-linux-arm64-bin",
+    "linux-x64-gnu": "codex-ops-linux-x64-gnu",
+    "linux-arm64-gnu": "codex-ops-linux-arm64-gnu",
+    "linux-x64-musl": "codex-ops-linux-x64-musl",
+    "linux-arm64-musl": "codex-ops-linux-arm64-musl",
     "darwin-x64": "codex-ops-macos-x64-bin",
     "darwin-arm64": "codex-ops-macos-arm64-bin",
     "win32-x64-msvc": "codex-ops-windows-x64-bin"
   };
 
-  return [packageByTarget[target], `@codex-ops/${target}`, `codex-ops-${target}`].filter(Boolean);
+  return [packageByTarget[target]].filter(Boolean);
 }
 
 function resolveTarget() {
-  const { arch, platform } = currentPlatform();
+  const { arch, libc, platform } = currentPlatform();
 
   if (platform === "darwin") {
     if (arch === "x64" || arch === "arm64") {
@@ -184,7 +186,7 @@ function resolveTarget() {
 
   if (platform === "linux") {
     if (arch === "x64" || arch === "arm64") {
-      return { ok: true, value: `linux-${arch}` };
+      return { ok: true, value: `linux-${arch}-${libc}` };
     }
     return { ok: false, reason: `unsupported Linux architecture: ${arch}` };
   }
@@ -223,8 +225,13 @@ function detectLinuxLibc() {
 function currentPlatform() {
   const platform = process.env[platformOverrideEnv] || process.platform;
   const arch = process.env[archOverrideEnv] || process.arch;
-  const libc = platform === "linux" ? process.env[libcOverrideEnv] || detectLinuxLibc() : undefined;
+  const libc =
+    platform === "linux" ? normalizeLinuxLibc(process.env[libcOverrideEnv] || detectLinuxLibc()) : undefined;
   return { platform, arch, libc };
+}
+
+function normalizeLinuxLibc(libc) {
+  return libc === "glibc" ? "gnu" : libc;
 }
 
 function checkExecutable(path) {

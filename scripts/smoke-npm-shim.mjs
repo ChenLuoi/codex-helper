@@ -58,7 +58,23 @@ const cases = [
     stderrIncludes: "codex-ops: unable to find the Rust binary."
   },
   {
-    name: "linux musl uses static package target",
+    name: "linux glibc uses gnu package target",
+    args: ["--help"],
+    skipRustBinaryOverride: true,
+    env: {
+      CODEX_OPS_SHIM_TEST_PLATFORM: "linux",
+      CODEX_OPS_SHIM_TEST_ARCH: "x64",
+      CODEX_OPS_SHIM_TEST_LIBC: "glibc"
+    },
+    expectedStatus: 127,
+    stderrIncludes: [
+      "codex-ops: unable to find the Rust binary.",
+      "target: linux-x64-gnu",
+      "codex-ops-linux-x64-gnu"
+    ]
+  },
+  {
+    name: "linux musl uses musl package target",
     args: ["--help"],
     skipRustBinaryOverride: true,
     env: {
@@ -69,8 +85,8 @@ const cases = [
     expectedStatus: 127,
     stderrIncludes: [
       "codex-ops: unable to find the Rust binary.",
-      "target: linux-x64",
-      "codex-ops-linux-x64-bin"
+      "target: linux-x64-musl",
+      "codex-ops-linux-x64-musl"
     ]
   }
 ];
