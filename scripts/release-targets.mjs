@@ -5,7 +5,7 @@ export const releaseTargets = [
   {
     target: "linux-x64-gnu",
     rustTarget: "x86_64-unknown-linux-gnu",
-    packageName: "codex-ops-linux-x64-gnu",
+    packageName: "codex-ops-linux-x64-bin",
     os: ["linux"],
     cpu: ["x64"],
     libc: ["glibc"],
@@ -14,7 +14,7 @@ export const releaseTargets = [
   {
     target: "linux-arm64-gnu",
     rustTarget: "aarch64-unknown-linux-gnu",
-    packageName: "codex-ops-linux-arm64-gnu",
+    packageName: "codex-ops-linux-arm64-bin",
     os: ["linux"],
     cpu: ["arm64"],
     libc: ["glibc"],
@@ -23,7 +23,7 @@ export const releaseTargets = [
   {
     target: "darwin-x64",
     rustTarget: "x86_64-apple-darwin",
-    packageName: "codex-ops-darwin-x64",
+    packageName: "codex-ops-macos-x64-bin",
     os: ["darwin"],
     cpu: ["x64"],
     binaryName: "codex-ops"
@@ -31,7 +31,7 @@ export const releaseTargets = [
   {
     target: "darwin-arm64",
     rustTarget: "aarch64-apple-darwin",
-    packageName: "codex-ops-darwin-arm64",
+    packageName: "codex-ops-macos-arm64-bin",
     os: ["darwin"],
     cpu: ["arm64"],
     binaryName: "codex-ops"
@@ -39,7 +39,7 @@ export const releaseTargets = [
   {
     target: "win32-x64-msvc",
     rustTarget: "x86_64-pc-windows-msvc",
-    packageName: "codex-ops-win32-x64-msvc",
+    packageName: "codex-ops-windows-x64-bin",
     os: ["win32"],
     cpu: ["x64"],
     binaryName: "codex-ops.exe"

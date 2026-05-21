@@ -161,7 +161,15 @@ function buildCandidates(target) {
 }
 
 function optionalPackageNames(target) {
-  return [`@codex-ops/${target}`, `codex-ops-${target}`];
+  const packageByTarget = {
+    "linux-x64-gnu": "codex-ops-linux-x64-bin",
+    "linux-arm64-gnu": "codex-ops-linux-arm64-bin",
+    "darwin-x64": "codex-ops-macos-x64-bin",
+    "darwin-arm64": "codex-ops-macos-arm64-bin",
+    "win32-x64-msvc": "codex-ops-windows-x64-bin"
+  };
+
+  return [packageByTarget[target], `@codex-ops/${target}`, `codex-ops-${target}`].filter(Boolean);
 }
 
 function resolveTarget() {

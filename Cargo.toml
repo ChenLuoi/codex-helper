@@ -1,6 +1,6 @@
 [package]
 name = "codex-ops"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A local operations CLI for Codex auth, usage, and cycle workflows."
 license = "MIT"
