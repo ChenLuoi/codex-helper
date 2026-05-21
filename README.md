@@ -410,16 +410,23 @@ Linux npm packages are split by libc. GNU/glibc Linux installs the `*-gnu`
 package for native performance, while musl Linux installs the static `*-musl`
 package for Alpine-style environments.
 
-Each artifact contains the Rust binary, `manifest.json`, and `SHA256SUMS`. The
-main npm package depends on platform packages named for the platform target
-through `optionalDependencies`. The release workflow validates Cargo/npm version
-synchronization and only publishes when manually triggered with the explicit
-publish confirmation and configured `CARGO_REGISTRY_TOKEN` / `NPM_TOKEN`
-secrets.
+The main `codex-ops` npm package depends on scoped `@codexops/*` platform
+packages through `optionalDependencies`. The release workflow is tag-driven:
+push a `vX.Y.Z` tag matching `package.json` / `Cargo.toml`, and Actions builds
+the platform binaries, npm tarballs, crate archive, `release-manifest.json`, and
+top-level `SHA256SUMS` once. Those assets are uploaded to a draft GitHub
+Release before registry publishing starts.
+
+Publishing to crates.io and npm is gated by the GitHub `release` environment.
+After approval, the workflow publishes the crate, then the scoped platform npm
+tarballs, then the main npm tarball. npm publish steps reuse the previously
+packed tarballs and skip package versions that already exist, so a failed
+registry publish can be retried from the same tag. When all registry publishes
+finish, the draft GitHub Release is published.
 
 Before publishing, recheck npm platform package name availability, crates.io
-token access, GitHub `release` environment approval, the first release version,
-and whether any legacy migration package or alias is needed.
+token access, GitHub `release` environment approval, and whether any legacy
+migration package or alias is needed.
 
 ## Data Safety
 

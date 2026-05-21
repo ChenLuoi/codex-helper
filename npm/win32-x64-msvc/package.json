@@ -1,5 +1,5 @@
 {
-  "name": "codex-ops-windows-x64-bin",
+  "name": "@codexops/win32-x64-msvc",
   "version": "0.1.6",
   "description": "Prebuilt codex-ops Rust binary for Windows x64.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
@@ -11,6 +11,9 @@
     "url": "git+https://github.com/ChenLuoi/codex-ops.git"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "os": [
     "win32"
   ],

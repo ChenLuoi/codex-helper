@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { currentReleaseTarget } from "./release-targets.mjs";
+import { currentReleaseTarget, npmPackFileName } from "./release-targets.mjs";
 import { stageReleaseArtifact } from "./package-release-artifact.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -39,7 +39,7 @@ run("npm", ["pack", staged.npmPackageDir, "--pack-destination", packDir], {
 });
 
 const mainPack = findExactPack(packDir, `codex-ops-${packageJson.version}.tgz`);
-const platformPack = findExactPack(packDir, `${target.packageName}-${packageJson.version}.tgz`);
+const platformPack = findExactPack(packDir, npmPackFileName(target.packageName, packageJson.version));
 
 run(
   "npm",

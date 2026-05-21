@@ -70,7 +70,7 @@ const cases = [
     stderrIncludes: [
       "codex-ops: unable to find the Rust binary.",
       "target: linux-x64-gnu",
-      "codex-ops-linux-x64-gnu"
+      "@codexops/linux-x64-gnu"
     ]
   },
   {
@@ -86,7 +86,7 @@ const cases = [
     stderrIncludes: [
       "codex-ops: unable to find the Rust binary.",
       "target: linux-x64-musl",
-      "codex-ops-linux-x64-musl"
+      "@codexops/linux-x64-musl"
     ]
   }
 ];

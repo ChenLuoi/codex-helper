@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { targetByName } from "./release-targets.mjs";
 
@@ -27,6 +27,8 @@ export function stageReleaseArtifact(options) {
   );
   const outputDir = resolve(repoRoot, options.outputDir ?? join("dist", "release"));
   const artifactDir = join(outputDir, `codex-ops-${packageJson.version}-${target.target}`);
+  const binaryArchiveDir = join(outputDir, "binary-tarballs");
+  const binaryArchive = join(binaryArchiveDir, `${basename(artifactDir)}.tar.gz`);
   const npmPackageDir = join(outputDir, "npm", target.packageName);
   const relativeBinary = ["bin", target.binaryName].join("/");
   const commit = process.env.GITHUB_SHA ?? gitCommitOrUnknown();
@@ -42,6 +44,7 @@ export function stageReleaseArtifact(options) {
 
   mkdirSync(join(artifactDir, "bin"), { recursive: true });
   mkdirSync(join(outputDir, "npm-tarballs"), { recursive: true });
+  mkdirSync(binaryArchiveDir, { recursive: true });
   copyFileSync(binaryPath, join(artifactDir, relativeBinary));
   copyFileSync(join(repoRoot, "README.md"), join(artifactDir, "README.md"));
   writeFileSync(join(artifactDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -59,8 +62,11 @@ export function stageReleaseArtifact(options) {
     chmodSync(join(npmPackageDir, relativeBinary), 0o755);
   }
 
+  createTarGz(artifactDir, binaryArchive);
+
   return {
     artifactDir,
+    binaryArchive,
     npmPackageDir,
     target: target.target,
     rustTarget,
@@ -125,6 +131,24 @@ function checksumFile(root, paths) {
 
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function createTarGz(sourceDir, archivePath) {
+  const result = spawnSync("tar", ["-czf", archivePath, "-C", dirname(sourceDir), basename(sourceDir)], {
+    encoding: "utf8"
+  });
+
+  if (result.status !== 0) {
+    throw new Error(
+      [
+        `Failed to create ${archivePath}`,
+        "--- stdout ---",
+        result.stdout,
+        "--- stderr ---",
+        result.stderr
+      ].join("\n")
+    );
+  }
 }
 
 function platformReadme(target, version) {
