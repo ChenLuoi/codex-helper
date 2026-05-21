@@ -58,7 +58,7 @@ const cases = [
     stderrIncludes: "codex-ops: unable to find the Rust binary."
   },
   {
-    name: "unsupported linux musl",
+    name: "linux musl uses static package target",
     args: ["--help"],
     skipRustBinaryOverride: true,
     env: {
@@ -66,13 +66,11 @@ const cases = [
       CODEX_OPS_SHIM_TEST_ARCH: "x64",
       CODEX_OPS_SHIM_TEST_LIBC: "musl"
     },
-    expectedStatus: 1,
+    expectedStatus: 127,
     stderrIncludes: [
-      "codex-ops: unsupported platform for the bundled Rust binary.",
-      "target: linux-x64-musl",
-      "Alpine/musl Linux is not supported",
-      "linux-x64-gnu",
-      "linux-arm64-gnu"
+      "codex-ops: unable to find the Rust binary.",
+      "target: linux-x64",
+      "codex-ops-linux-x64-bin"
     ]
   }
 ];

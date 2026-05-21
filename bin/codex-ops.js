@@ -162,8 +162,8 @@ function buildCandidates(target) {
 
 function optionalPackageNames(target) {
   const packageByTarget = {
-    "linux-x64-gnu": "codex-ops-linux-x64-bin",
-    "linux-arm64-gnu": "codex-ops-linux-arm64-bin",
+    "linux-x64": "codex-ops-linux-x64-bin",
+    "linux-arm64": "codex-ops-linux-arm64-bin",
     "darwin-x64": "codex-ops-macos-x64-bin",
     "darwin-arm64": "codex-ops-macos-arm64-bin",
     "win32-x64-msvc": "codex-ops-windows-x64-bin"
@@ -173,7 +173,7 @@ function optionalPackageNames(target) {
 }
 
 function resolveTarget() {
-  const { arch, libc, platform } = currentPlatform();
+  const { arch, platform } = currentPlatform();
 
   if (platform === "darwin") {
     if (arch === "x64" || arch === "arm64") {
@@ -184,22 +184,7 @@ function resolveTarget() {
 
   if (platform === "linux") {
     if (arch === "x64" || arch === "arm64") {
-      const target = `linux-${arch}-${libc}`;
-
-      if (libc === "gnu") {
-        return { ok: true, value: target };
-      }
-
-      if (libc === "musl") {
-        return {
-          ok: false,
-          target,
-          reason:
-            "Alpine/musl Linux is not supported by codex-ops npm packages. Supported Linux targets are linux-x64-gnu and linux-arm64-gnu (glibc)."
-        };
-      }
-
-      return { ok: false, target, reason: `unsupported Linux libc: ${libc}` };
+      return { ok: true, value: `linux-${arch}` };
     }
     return { ok: false, reason: `unsupported Linux architecture: ${arch}` };
   }

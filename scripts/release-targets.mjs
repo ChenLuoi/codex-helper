@@ -3,21 +3,19 @@
 
 export const releaseTargets = [
   {
-    target: "linux-x64-gnu",
-    rustTarget: "x86_64-unknown-linux-gnu",
+    target: "linux-x64",
+    rustTarget: "x86_64-unknown-linux-musl",
     packageName: "codex-ops-linux-x64-bin",
     os: ["linux"],
     cpu: ["x64"],
-    libc: ["glibc"],
     binaryName: "codex-ops"
   },
   {
-    target: "linux-arm64-gnu",
-    rustTarget: "aarch64-unknown-linux-gnu",
+    target: "linux-arm64",
+    rustTarget: "aarch64-unknown-linux-musl",
     packageName: "codex-ops-linux-arm64-bin",
     os: ["linux"],
     cpu: ["arm64"],
-    libc: ["glibc"],
     binaryName: "codex-ops"
   },
   {
@@ -47,17 +45,18 @@ export const releaseTargets = [
 ];
 
 export const expectedReleaseTargetNames = [
-  "linux-x64-gnu",
-  "linux-arm64-gnu",
+  "linux-x64",
+  "linux-arm64",
   "darwin-x64",
   "darwin-arm64",
   "win32-x64-msvc"
 ];
 
-export const unsupportedRuntimeTargets = [
-  "linux-x64-musl",
-  "linux-arm64-musl",
-  "win32-arm64-msvc"
+export const unsupportedOptionalDependencyNames = [
+  "codex-ops-linux-x64-gnu",
+  "codex-ops-linux-arm64-gnu",
+  "codex-ops-win32-x64-msvc",
+  "codex-ops-windows-arm64-bin"
 ];
 
 export function targetByName(targetName) {
@@ -75,16 +74,11 @@ export function currentReleaseTarget() {
   const arch = process.arch;
 
   if (platform === "linux") {
-    const libc = detectLinuxLibc();
-    const target = `linux-${arch}-${libc}`;
-
-    if (libc === "musl") {
-      throw new Error(
-        `Unsupported release target: ${target}. Alpine/musl is not supported; supported Linux targets are linux-x64-gnu and linux-arm64-gnu.`
-      );
+    if (arch === "x64" || arch === "arm64") {
+      return targetByName(`linux-${arch}`);
     }
 
-    return targetByName(target);
+    throw new Error(`Unsupported release target: linux-${arch}`);
   }
 
   if (platform === "darwin") {
@@ -108,17 +102,4 @@ export function currentReleaseTarget() {
 
 export function optionalDependencyMap(version) {
   return Object.fromEntries(releaseTargets.map((target) => [target.packageName, version]));
-}
-
-function detectLinuxLibc() {
-  try {
-    const report = process.report?.getReport?.();
-    if (report?.header?.glibcVersionRuntime) {
-      return "gnu";
-    }
-  } catch {
-    return "gnu";
-  }
-
-  return "musl";
 }
