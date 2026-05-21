@@ -342,8 +342,9 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          error_log="${RUNNER_TEMP}/cargo-publish.err"
           set +e
-          cargo publish --locked --registry crates-io --token "$CARGO_REGISTRY_TOKEN" 2>cargo-publish.err
+          cargo publish --locked --registry crates-io 2>"$error_log"
           status=$?
           set -e
 
@@ -351,13 +352,13 @@ jobs:
             exit 0
           fi
 
-          if grep -Eiq "already (uploaded|exists)|has already been uploaded|crate version .* already exists" cargo-publish.err; then
-            cat cargo-publish.err
+          if grep -Eiq "already (uploaded|exists)|has already been uploaded|crate version .* already exists" "$error_log"; then
+            cat "$error_log"
             echo "crate version already exists on crates.io; skipping"
             exit 0
           fi
 
-          cat cargo-publish.err
+          cat "$error_log"
           exit "$status"
 
       - name: Publish npm artifacts
