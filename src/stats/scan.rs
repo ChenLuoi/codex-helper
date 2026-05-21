@@ -1214,6 +1214,34 @@ mod tests {
     }
 
     #[test]
+    fn account_filter_without_history_does_not_include_unattributed_usage() {
+        let temp = TempDir::new().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        write_session_file(
+            &sessions_dir,
+            2026,
+            5,
+            21,
+            "rollout-2026-05-21T00-00-00-account-filter.jsonl",
+            &[token_count_line("2026-05-21T00:00:01.000Z")],
+        );
+
+        let report = read_usage_records_report(&UsageRecordsReadOptions {
+            start: utc_time(2026, 5, 21, 0),
+            end: utc_time(2026, 5, 21, 1),
+            sessions_dir,
+            scan_all_files: false,
+            account_history_file: Some(temp.path().join("missing-history.json")),
+            account_id: Some("account-fixture".to_string()),
+        })
+        .expect("read usage report");
+
+        assert!(report.records.is_empty());
+        assert_eq!(report.diagnostics.included_usage_events, 0);
+        assert_eq!(report.diagnostics.skipped_events.account_mismatch, 1);
+    }
+
+    #[test]
     fn old_files_before_lookback_use_mtime_before_tail_prefilter() {
         let temp = TempDir::new().expect("tempdir");
         let start = utc_time(2000, 1, 1, 0);

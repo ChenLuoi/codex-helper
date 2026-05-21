@@ -1,9 +1,12 @@
-use super::cli::{resolve_account_history_file, CycleCommandOptions};
+use super::cli::{auth_options, resolve_account_history_file, CycleCommandOptions};
 use super::reports::{
     WeeklyCycleBreakdownRow, WeeklyCycleReportRow, WeeklyCycleUnpricedModelRow,
     WeeklyCycleUsageTotals,
 };
 use super::windows::earliest_anchor_date;
+use super::DEFAULT_WEEKLY_CYCLE_ACCOUNT_ID;
+use crate::account_history::{self, AccountHistoryAccount};
+use crate::auth::read_codex_auth_status;
 use crate::error::AppError;
 use crate::pricing::{
     calculate_credit_cost, normalize_model_name, TokenUsage as PricingTokenUsage,
@@ -15,12 +18,18 @@ use crate::stats::{
 use crate::storage::{resolve_storage_paths, StorageOptions};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use super::store::WeeklyCycleAnchor;
 
 pub(super) struct CycleUsageReadResult {
     pub(super) records: Vec<UsageRecord>,
     pub(super) diagnostics: Option<UsageDiagnostics>,
+}
+
+struct CycleUsageAccountFilter {
+    account_history_file: Option<PathBuf>,
+    account_id: Option<String>,
 }
 
 pub(super) fn read_weekly_cycle_usage_for_current(
@@ -47,13 +56,14 @@ pub(super) fn read_weekly_cycle_usage_for_current(
         sessions_dir: options.sessions_dir.clone(),
         ..StorageOptions::default()
     });
+    let account_filter = cycle_usage_account_filter(account_id, options, now)?;
     let report = read_usage_records_report(&UsageRecordsReadOptions {
         start: earliest_anchor,
         end: now,
         sessions_dir: paths.sessions_dir,
         scan_all_files: true,
-        account_history_file: Some(resolve_account_history_file(options)),
-        account_id: Some(account_id.to_string()),
+        account_history_file: account_filter.account_history_file,
+        account_id: account_filter.account_id,
     })?;
 
     Ok(CycleUsageReadResult {
@@ -86,19 +96,80 @@ pub(super) fn read_weekly_cycle_usage_for_history(
         });
     }
 
+    let account_filter = cycle_usage_account_filter(account_id, options, range.end)?;
     let report = read_usage_records_report(&UsageRecordsReadOptions {
         start: scan_start,
         end: range.end,
         sessions_dir: range.sessions_dir.clone(),
         scan_all_files: true,
-        account_history_file: Some(resolve_account_history_file(options)),
-        account_id: Some(account_id.to_string()),
+        account_history_file: account_filter.account_history_file,
+        account_id: account_filter.account_id,
     })?;
 
     Ok(CycleUsageReadResult {
         records: report.records,
         diagnostics: Some(report.diagnostics),
     })
+}
+
+fn cycle_usage_account_filter(
+    account_id: &str,
+    options: &CycleCommandOptions,
+    observed_at: DateTime<Utc>,
+) -> Result<CycleUsageAccountFilter, AppError> {
+    if options.account_id.is_none() && account_id == DEFAULT_WEEKLY_CYCLE_ACCOUNT_ID {
+        return Ok(CycleUsageAccountFilter {
+            account_history_file: None,
+            account_id: None,
+        });
+    }
+
+    let account_history_file = resolve_account_history_file(options);
+    ensure_cycle_account_history_default(&account_history_file, account_id, options, observed_at)?;
+
+    Ok(CycleUsageAccountFilter {
+        account_history_file: Some(account_history_file),
+        account_id: Some(account_id.to_string()),
+    })
+}
+
+fn ensure_cycle_account_history_default(
+    account_history_file: &Path,
+    account_id: &str,
+    options: &CycleCommandOptions,
+    observed_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let store = account_history::read_account_history_store(account_history_file)?;
+    if store.default_account.is_some() || !store.switches.is_empty() {
+        return Ok(());
+    }
+
+    let Ok(report) = read_codex_auth_status(&auth_options(options), observed_at) else {
+        return Ok(());
+    };
+    let Some(auth_account_id) = report
+        .summary
+        .chatgpt_account_id
+        .as_deref()
+        .or(report.summary.token_account_id.as_deref())
+    else {
+        return Ok(());
+    };
+    if auth_account_id != account_id {
+        return Ok(());
+    }
+
+    account_history::ensure_default_account_in_file(
+        account_history_file,
+        AccountHistoryAccount::auth_json(
+            account_id.to_string(),
+            observed_at,
+            report.summary.name.clone(),
+            report.summary.email.clone(),
+            report.summary.plan_type.clone(),
+        ),
+    )?;
+    Ok(())
 }
 
 pub(super) fn aggregate_weekly_cycle_records(records: &[UsageRecord]) -> WeeklyCycleUsageTotals {

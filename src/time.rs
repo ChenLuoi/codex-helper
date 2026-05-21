@@ -79,10 +79,11 @@ pub fn parse_date_bound(value: &str, bound: DateBound) -> Result<DateTime<Utc>, 
                 parts[1].parse::<u32>(),
                 parts[2].parse::<u32>(),
             ) {
-                return match bound {
-                    DateBound::Start => Ok(local_to_utc(year, month, day, 0, 0, 0, 0)),
-                    DateBound::End => Ok(local_to_utc(year, month, day, 23, 59, 59, 999)),
+                let parsed = match bound {
+                    DateBound::Start => local_to_utc_checked(year, month, day, 0, 0, 0, 0),
+                    DateBound::End => local_to_utc_checked(year, month, day, 23, 59, 59, 999),
                 };
+                return parsed.ok_or_else(|| invalid_time_error(bound, value));
             }
         }
     }
@@ -102,11 +103,7 @@ pub fn parse_date_bound(value: &str, bound: DateBound) -> Result<DateTime<Utc>, 
         }
     }
 
-    let name = match bound {
-        DateBound::Start => "start",
-        DateBound::End => "end",
-    };
-    Err(AppError::new(format!("Invalid {name} time: {value}")))
+    Err(invalid_time_error(bound, value))
 }
 
 pub fn resolve_date_range(
@@ -170,10 +167,13 @@ pub fn resolve_date_range(
     }
 
     if let Some(last) = &raw.last {
-        return Ok(DateRange {
-            start: now - Duration::milliseconds(parse_duration_ms(last)?),
-            end: now,
-        });
+        let duration_ms = parse_duration_ms(last)?;
+        let start = now
+            .checked_sub_signed(Duration::milliseconds(duration_ms))
+            .ok_or_else(|| {
+                AppError::invalid_input("Invalid --last value. Duration is too large.")
+            })?;
+        return Ok(DateRange { start, end: now });
     }
 
     let end = match &raw.end {
@@ -212,14 +212,31 @@ pub fn parse_duration_ms(value: &str) -> Result<i64, AppError> {
     }
 
     let hours = match unit {
-        "h" => amount,
-        "d" => amount * 24,
-        "w" => amount * 7 * 24,
-        "mo" => amount * 30 * 24,
+        "h" => Some(amount),
+        "d" => amount.checked_mul(24),
+        "w" => amount
+            .checked_mul(7)
+            .and_then(|amount| amount.checked_mul(24)),
+        "mo" => amount
+            .checked_mul(30)
+            .and_then(|amount| amount.checked_mul(24)),
         _ => unreachable!("validated unit"),
-    };
+    }
+    .ok_or_else(|| AppError::invalid_input("Invalid --last value. Duration is too large."))?;
 
-    Ok(hours * 60 * 60 * 1000)
+    hours
+        .checked_mul(60)
+        .and_then(|minutes| minutes.checked_mul(60))
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| AppError::invalid_input("Invalid --last value. Duration is too large."))
+}
+
+fn invalid_time_error(bound: DateBound, value: &str) -> AppError {
+    let name = match bound {
+        DateBound::Start => "start",
+        DateBound::End => "end",
+    };
+    AppError::invalid_input(format!("Invalid {name} time: {value}"))
 }
 
 pub fn resolve_group_by(
@@ -459,6 +476,15 @@ mod tests {
         assert_eq!(parse_duration_ms("1mo").expect("duration"), 2_592_000_000);
         assert!(parse_duration_ms("0d").is_err());
         assert!(parse_duration_ms("3m").is_err());
+        assert!(parse_duration_ms("9223372036854775807d").is_err());
+    }
+
+    #[test]
+    fn invalid_date_only_bounds_return_errors() {
+        let error = parse_date_bound("2026-02-31", DateBound::Start).expect_err("invalid date");
+
+        assert_eq!(error.message(), "Invalid start time: 2026-02-31");
+        assert_eq!(error.exit_code(), 2);
     }
 
     #[test]

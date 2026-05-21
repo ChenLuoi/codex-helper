@@ -123,9 +123,7 @@ pub fn read_usage_records_report(
         include_reasoning_effort: false,
         scan_all_files: options.scan_all_files,
         verbose: false,
-        account_id: account_history
-            .as_ref()
-            .and_then(|_| options.account_id.clone()),
+        account_id: options.account_id.clone(),
         account_history,
     };
     let diagnostics =
