@@ -14,7 +14,13 @@ use std::thread;
 use super::reports::{TokenUsage, UsageDiagnostics, UsageRecordView};
 
 const DEFAULT_FILE_READ_CONCURRENCY: i64 = 8;
+
+#[cfg(target_env = "musl")]
+const DEFAULT_MAX_FILE_SCAN_THREADS: usize = 1;
+
+#[cfg(not(target_env = "musl"))]
 const DEFAULT_MAX_FILE_SCAN_THREADS: usize = 8;
+
 const FILE_SCAN_WORKER_MIN_FILES: usize = 64;
 const SESSION_READ_BUFFER_SIZE: usize = 256 * 1024;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -702,6 +708,13 @@ fn rollout_timestamp_from_file_name(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
 
     #[test]
     fn partitions_files_for_workers_in_stable_order() {
@@ -717,5 +730,41 @@ mod tests {
         assert_eq!(partitions.into_iter().flatten().collect::<Vec<_>>(), files);
         assert!(partition_files_for_workers(&[], 8).is_empty());
         assert_eq!(partition_files_for_workers(&files[..2], 8).len(), 2);
+    }
+
+    #[test]
+    fn default_file_scan_worker_limit_matches_target_env() {
+        if cfg!(target_env = "musl") {
+            assert_eq!(DEFAULT_MAX_FILE_SCAN_THREADS, 1);
+        } else {
+            assert_eq!(DEFAULT_MAX_FILE_SCAN_THREADS, 8);
+        }
+    }
+
+    #[test]
+    fn file_scan_worker_count_respects_small_file_sets() {
+        let _guard = env_lock();
+        env::remove_var("CODEX_OPS_STAT_WORKERS");
+
+        assert_eq!(resolve_file_scan_worker_count(0).unwrap(), 1);
+        assert_eq!(resolve_file_scan_worker_count(1).unwrap(), 1);
+        assert_eq!(
+            resolve_file_scan_worker_count(FILE_SCAN_WORKER_MIN_FILES - 1).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn file_scan_worker_count_respects_env_override() {
+        let _guard = env_lock();
+        env::set_var("CODEX_OPS_STAT_WORKERS", "4");
+
+        assert_eq!(resolve_file_scan_worker_count(100).unwrap(), 4);
+        assert_eq!(resolve_file_scan_worker_count(2).unwrap(), 2);
+
+        env::set_var("CODEX_OPS_STAT_WORKERS", "0");
+        assert_eq!(resolve_file_scan_worker_count(100).unwrap(), 1);
+
+        env::remove_var("CODEX_OPS_STAT_WORKERS");
     }
 }

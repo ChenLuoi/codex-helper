@@ -395,18 +395,21 @@ development assets.
 GitHub Actions builds release artifacts for:
 
 ```text
-linux-x64
-linux-arm64
+linux-x64-gnu
+linux-arm64-gnu
+linux-x64-musl
+linux-arm64-musl
 darwin-x64
 darwin-arm64
 win32-x64-msvc
 ```
 
-Linux npm packages are built as static musl binaries and are intended to run on
-both GNU/glibc and musl Linux distributions for the supported CPU architecture.
+Linux npm packages are split by libc. GNU/glibc Linux installs the `*-gnu`
+package for native performance, while musl Linux installs the static `*-musl`
+package for Alpine-style environments.
 
 Each artifact contains the Rust binary, `manifest.json`, and `SHA256SUMS`. The
-main npm package depends on platform packages named `codex-ops-<platform>-<arch>-bin`
+main npm package depends on platform packages named for the platform target
 through `optionalDependencies`. The release workflow validates Cargo/npm version
 synchronization and only publishes when manually triggered with the explicit
 publish confirmation and configured `CARGO_REGISTRY_TOKEN` / `NPM_TOKEN`

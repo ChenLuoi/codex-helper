@@ -1,7 +1,7 @@
 {
-  "name": "codex-ops-windows-x64-bin",
+  "name": "codex-ops-linux-x64-musl",
   "version": "0.1.4",
-  "description": "Prebuilt codex-ops Rust binary for Windows x64.",
+  "description": "Prebuilt static codex-ops Rust binary for Linux x64 musl.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
   "bugs": {
     "url": "https://github.com/ChenLuoi/codex-ops/issues"
@@ -12,10 +12,13 @@
   },
   "license": "MIT",
   "os": [
-    "win32"
+    "linux"
   ],
   "cpu": [
     "x64"
+  ],
+  "libc": [
+    "musl"
   ],
   "files": [
     "bin/**",

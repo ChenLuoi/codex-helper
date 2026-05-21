@@ -56,16 +56,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform_target: linux-x64
+          - platform_target: linux-x64-gnu
+            rust_target: x86_64-unknown-linux-gnu
+            npm_package: codex-ops-linux-x64-gnu
+            binary: codex-ops
+            run_binary: true
+            static_binary: false
+            os: ubuntu-22.04
+          - platform_target: linux-arm64-gnu
+            rust_target: aarch64-unknown-linux-gnu
+            npm_package: codex-ops-linux-arm64-gnu
+            binary: codex-ops
+            run_binary: true
+            static_binary: false
+            os: ubuntu-24.04-arm
+          - platform_target: linux-x64-musl
             rust_target: x86_64-unknown-linux-musl
-            npm_package: codex-ops-linux-x64-bin
+            npm_package: codex-ops-linux-x64-musl
             binary: codex-ops
             run_binary: true
             static_binary: true
             os: ubuntu-latest
-          - platform_target: linux-arm64
+          - platform_target: linux-arm64-musl
             rust_target: aarch64-unknown-linux-musl
-            npm_package: codex-ops-linux-arm64-bin
+            npm_package: codex-ops-linux-arm64-musl
             binary: codex-ops
             run_binary: false
             static_binary: true
@@ -184,8 +198,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform_target: linux-x64
-          - platform_target: linux-arm64
+          - platform_target: linux-x64-gnu
+          - platform_target: linux-arm64-gnu
+          - platform_target: linux-x64-musl
+          - platform_target: linux-arm64-musl
           - platform_target: darwin-x64
           - platform_target: darwin-arm64
           - platform_target: win32-x64-msvc

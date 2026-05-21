@@ -3,19 +3,39 @@
 
 export const releaseTargets = [
   {
-    target: "linux-x64",
-    rustTarget: "x86_64-unknown-linux-musl",
-    packageName: "codex-ops-linux-x64-bin",
+    target: "linux-x64-gnu",
+    rustTarget: "x86_64-unknown-linux-gnu",
+    packageName: "codex-ops-linux-x64-gnu",
     os: ["linux"],
     cpu: ["x64"],
+    libc: ["glibc"],
     binaryName: "codex-ops"
   },
   {
-    target: "linux-arm64",
-    rustTarget: "aarch64-unknown-linux-musl",
-    packageName: "codex-ops-linux-arm64-bin",
+    target: "linux-arm64-gnu",
+    rustTarget: "aarch64-unknown-linux-gnu",
+    packageName: "codex-ops-linux-arm64-gnu",
     os: ["linux"],
     cpu: ["arm64"],
+    libc: ["glibc"],
+    binaryName: "codex-ops"
+  },
+  {
+    target: "linux-x64-musl",
+    rustTarget: "x86_64-unknown-linux-musl",
+    packageName: "codex-ops-linux-x64-musl",
+    os: ["linux"],
+    cpu: ["x64"],
+    libc: ["musl"],
+    binaryName: "codex-ops"
+  },
+  {
+    target: "linux-arm64-musl",
+    rustTarget: "aarch64-unknown-linux-musl",
+    packageName: "codex-ops-linux-arm64-musl",
+    os: ["linux"],
+    cpu: ["arm64"],
+    libc: ["musl"],
     binaryName: "codex-ops"
   },
   {
@@ -45,16 +65,18 @@ export const releaseTargets = [
 ];
 
 export const expectedReleaseTargetNames = [
-  "linux-x64",
-  "linux-arm64",
+  "linux-x64-gnu",
+  "linux-arm64-gnu",
+  "linux-x64-musl",
+  "linux-arm64-musl",
   "darwin-x64",
   "darwin-arm64",
   "win32-x64-msvc"
 ];
 
 export const unsupportedOptionalDependencyNames = [
-  "codex-ops-linux-x64-gnu",
-  "codex-ops-linux-arm64-gnu",
+  "codex-ops-linux-x64-bin",
+  "codex-ops-linux-arm64-bin",
   "codex-ops-win32-x64-msvc",
   "codex-ops-windows-arm64-bin"
 ];
@@ -75,7 +97,7 @@ export function currentReleaseTarget() {
 
   if (platform === "linux") {
     if (arch === "x64" || arch === "arm64") {
-      return targetByName(`linux-${arch}`);
+      return targetByName(`linux-${arch}-${detectLinuxLibc()}`);
     }
 
     throw new Error(`Unsupported release target: linux-${arch}`);
@@ -98,6 +120,19 @@ export function currentReleaseTarget() {
   }
 
   throw new Error(`Unsupported release target: ${platform}-${arch}`);
+}
+
+function detectLinuxLibc() {
+  try {
+    const report = process.report?.getReport?.();
+    if (report?.header?.glibcVersionRuntime) {
+      return "gnu";
+    }
+  } catch {
+    return "gnu";
+  }
+
+  return "musl";
 }
 
 export function optionalDependencyMap(version) {
