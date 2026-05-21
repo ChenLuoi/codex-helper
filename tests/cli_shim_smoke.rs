@@ -4,7 +4,7 @@ use common::repo_root;
 use std::process::Command;
 
 #[test]
-fn npm_shim_reports_unsupported_musl_without_binary_lookup() {
+fn npm_shim_resolves_linux_musl_to_static_package_target() {
     let output = Command::new("node")
         .arg("bin/codex-ops.js")
         .arg("--help")
@@ -14,27 +14,25 @@ fn npm_shim_reports_unsupported_musl_without_binary_lookup() {
         .env("CODEX_OPS_SHIM_TEST_ARCH", "x64")
         .env("CODEX_OPS_SHIM_TEST_LIBC", "musl")
         .output()
-        .expect("run npm shim unsupported musl path");
+        .expect("run npm shim musl package lookup path");
 
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "unsupported musl should exit 1\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        Some(127),
+        "musl package lookup should exit 127 when package is not installed\n--- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     for expected in [
-        "codex-ops: unsupported platform for the bundled Rust binary.",
-        "target: linux-x64-musl",
-        "Alpine/musl Linux is not supported",
-        "linux-x64-gnu",
-        "linux-arm64-gnu",
+        "codex-ops: unable to find the Rust binary.",
+        "target: linux-x64",
+        "codex-ops-linux-x64-bin",
     ] {
         assert!(
             stderr.contains(expected),
-            "unsupported musl stderr missing {expected:?}\n--- stderr ---\n{stderr}"
+            "musl package lookup stderr missing {expected:?}\n--- stderr ---\n{stderr}"
         );
     }
 }

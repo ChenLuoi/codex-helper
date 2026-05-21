@@ -11,7 +11,7 @@ import {
   expectedReleaseTargetNames,
   optionalDependencyMap,
   releaseTargets,
-  unsupportedRuntimeTargets
+  unsupportedOptionalDependencyNames
 } from "./release-targets.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -94,7 +94,7 @@ assertEqual(
   expectedReleaseTargetNames,
   "release targets"
 );
-assertNoUnsupportedOptionalDependencies(packageJson.optionalDependencies, unsupportedRuntimeTargets);
+assertNoUnsupportedOptionalDependencies(packageJson.optionalDependencies, unsupportedOptionalDependencyNames);
 assertEqual(packageLock.name, packageJson.name, "package-lock name");
 assertEqual(packageLock.version, packageJson.version, "package-lock version");
 assertJsonEqual(
@@ -235,11 +235,10 @@ function assertCargoPackageExcludes(files, excludedPaths) {
   }
 }
 
-function assertNoUnsupportedOptionalDependencies(optionalDependencies, unsupportedTargets) {
+function assertNoUnsupportedOptionalDependencies(optionalDependencies, unsupportedPackageNames) {
   const packageNames = Object.keys(optionalDependencies ?? {});
 
-  for (const target of unsupportedTargets) {
-    const packageName = `codex-ops-${target}`;
+  for (const packageName of unsupportedPackageNames) {
     if (packageNames.includes(packageName)) {
       throw new Error(`${packageName}: unsupported runtime target must not be an optionalDependency`);
     }

@@ -56,17 +56,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform_target: linux-x64-gnu
-            rust_target: x86_64-unknown-linux-gnu
+          - platform_target: linux-x64
+            rust_target: x86_64-unknown-linux-musl
             npm_package: codex-ops-linux-x64-bin
             binary: codex-ops
             run_binary: true
+            static_binary: true
             os: ubuntu-latest
-          - platform_target: linux-arm64-gnu
-            rust_target: aarch64-unknown-linux-gnu
+          - platform_target: linux-arm64
+            rust_target: aarch64-unknown-linux-musl
             npm_package: codex-ops-linux-arm64-bin
             binary: codex-ops
             run_binary: false
+            static_binary: true
             os: ubuntu-24.04-arm
           - platform_target: darwin-x64
             rust_target: x86_64-apple-darwin
@@ -107,6 +109,26 @@ jobs:
       - name: Check native binary version
         if: matrix.run_binary
         run: node scripts/check-release.mjs --binary target/${{ matrix.rust_target }}/release/${{ matrix.binary }}
+
+      - name: Check Linux binary is static
+        if: matrix.static_binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.rust_target }}/release/${{ matrix.binary }}"
+          file "$binary"
+
+          ldd_output="$(ldd "$binary" 2>&1 || true)"
+          echo "$ldd_output"
+          if ! grep -Eq "not a dynamic executable|statically linked" <<<"$ldd_output"; then
+            echo "::error::Linux release binary is dynamically linked"
+            exit 1
+          fi
+
+          if readelf -d "$binary" 2>/dev/null | grep -q "(NEEDED)"; then
+            echo "::error::Linux release binary has dynamic library dependencies"
+            readelf -d "$binary"
+            exit 1
+          fi
 
       - name: Stage artifact and npm platform package
         run: >
@@ -162,8 +184,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform_target: linux-x64-gnu
-          - platform_target: linux-arm64-gnu
+          - platform_target: linux-x64
+          - platform_target: linux-arm64
           - platform_target: darwin-x64
           - platform_target: darwin-arm64
           - platform_target: win32-x64-msvc

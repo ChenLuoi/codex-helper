@@ -1,7 +1,7 @@
 {
-  "name": "codex-ops-linux-arm64-bin",
-  "version": "0.1.2",
-  "description": "Prebuilt codex-ops Rust binary for Linux arm64 GNU.",
+  "name": "codex-ops-linux-x64-bin",
+  "version": "0.1.3",
+  "description": "Prebuilt static codex-ops Rust binary for Linux x64.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
   "bugs": {
     "url": "https://github.com/ChenLuoi/codex-ops/issues"
@@ -15,10 +15,7 @@
     "linux"
   ],
   "cpu": [
-    "arm64"
-  ],
-  "libc": [
-    "glibc"
+    "x64"
   ],
   "files": [
     "bin/**",
