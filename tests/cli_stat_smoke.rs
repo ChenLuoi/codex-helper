@@ -2,10 +2,10 @@ mod common;
 
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use common::{
-    assert_array, assert_contains, assert_json_eq, assert_json_local_day_end,
-    assert_json_local_day_start, assert_success, assert_usage_diagnostics_schema,
-    assert_usage_totals_schema, fixed_now_utc, parse_csv, parse_json, run_codex_ops, Sandbox,
-    FIXED_NOW,
+    assert_array, assert_contains, assert_failure_contains, assert_json_eq,
+    assert_json_local_day_end, assert_json_local_day_start, assert_success,
+    assert_usage_diagnostics_schema, assert_usage_totals_schema, fixed_now_utc, parse_csv,
+    parse_json, run_codex_ops, Sandbox, FIXED_NOW,
 };
 
 #[test]
@@ -198,6 +198,40 @@ fn stat_time_ranges_use_fixed_now_and_local_date_bounds() {
         &explicit["end"],
         NaiveDate::from_ymd_opt(2026, 5, 11).expect("explicit end"),
         "stat explicit end",
+    );
+
+    let invalid_date = run_codex_ops(
+        [
+            "stat",
+            "--start",
+            "2026-02-31",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_failure_contains(
+        &invalid_date,
+        2,
+        "Invalid start time: 2026-02-31",
+        "stat invalid date",
+    );
+
+    let huge_last = run_codex_ops(
+        [
+            "stat",
+            "--last",
+            "9223372036854775807d",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_failure_contains(
+        &huge_last,
+        2,
+        "Invalid --last value. Duration is too large.",
+        "stat huge last",
     );
 }
 

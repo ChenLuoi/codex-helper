@@ -99,6 +99,46 @@ fn cycle_current_history_and_detail_json_schema_use_fixed_now() {
     assert_usage_totals_schema(&history["totals"], "cycle history totals");
     assert_cycle_diagnostics_schema(&history["diagnostics"], "cycle history diagnostics");
 
+    let generated_history_file = sandbox.codex_home.join("codex-ops/generated-history.json");
+    let cycle_history_generated_account = run_codex_ops(
+        [
+            "cycle",
+            "history",
+            "--cycle-file",
+            sandbox.cycle_file.to_str().unwrap(),
+            "--account-id",
+            "account-fixture",
+            "--auth-file",
+            sandbox.auth_file.to_str().unwrap(),
+            "--account-history-file",
+            generated_history_file.to_str().unwrap(),
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--last",
+            "30d",
+            "--format",
+            "json",
+        ],
+        &sandbox,
+    );
+    assert_success(
+        &cycle_history_generated_account,
+        "cycle history initializes account history",
+    );
+    let generated_account_history = parse_json(
+        &cycle_history_generated_account.stdout,
+        "cycle history initializes account history",
+    );
+    assert_json_eq(
+        &generated_account_history["totals"]["calls"],
+        3,
+        "cycle history initialized account calls",
+    );
+    assert!(
+        generated_history_file.exists(),
+        "cycle history should initialize matching current account history"
+    );
+
     let cycle_detail = run_codex_ops(
         [
             "cycle",

@@ -159,7 +159,7 @@ Use `--codex-home` or `--sessions-dir` to point it at another Codex data
 directory. The default scanner reads rollout files in the requested range and
 checks older rollout files in a bounded lookback window by their last
 `token_count` timestamp before deciding whether to read them. The lookback is
-`min(max((end - start) / 2, 2 days), 7 days)`.
+`min(max((end - start) / 2, 7 days), 30 days)`.
 Use `-F, --full-scan` when you need exact local `token_count` results across
 long sessions that may have started before the requested range. Full scan checks
 all rollout files before the requested range by last `token_count` timestamp.
@@ -203,7 +203,9 @@ Anchors are stored by account in
 `--account-id`, then the current `auth.json` account, then the fallback
 `default` account bucket. Cycle usage reads `auth-account-history.json` when
 available so usage from other accounts is not mixed into the selected account.
-Use `--cycle-file <path>` for an isolated store.
+If account history is missing and the selected account matches the current
+`auth.json`, cycle reports initialize the history default before filtering. Use
+`--cycle-file <path>` for an isolated store.
 
 Examples:
 
