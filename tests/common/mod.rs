@@ -26,7 +26,6 @@ pub struct Sandbox {
     pub sessions_dir: PathBuf,
     pub store_dir: PathBuf,
     pub account_history_file: PathBuf,
-    pub cycle_file: PathBuf,
 }
 
 impl Sandbox {
@@ -49,7 +48,6 @@ impl Sandbox {
             sessions_dir: codex_home.join("sessions"),
             store_dir: helper_dir.join("auth-profiles"),
             account_history_file: helper_dir.join("auth-account-history.json"),
-            cycle_file: helper_dir.join("stat-cycles.json"),
             codex_home,
         }
     }
@@ -216,6 +214,13 @@ pub fn assert_contains(actual: &str, expected: &str, label: &str) {
     );
 }
 
+pub fn assert_not_contains(actual: &str, unexpected: &str, label: &str) {
+    assert!(
+        !predicate::str::contains(unexpected).eval(actual),
+        "{label}: expected output not to include {unexpected:?}\n--- output ---\n{actual}"
+    );
+}
+
 pub fn assert_json_eq<T>(actual: &Value, expected: T, label: &str)
 where
     Value: PartialEq<T>,
@@ -253,6 +258,41 @@ pub fn assert_usage_totals_schema(value: &Value, label: &str) {
     assert_has_keys(
         value,
         &[
+            "sessions",
+            "calls",
+            "usage",
+            "credits",
+            "usd",
+            "pricedCalls",
+            "unpricedCalls",
+        ],
+        label,
+    );
+    assert_has_keys(
+        &value["usage"],
+        &[
+            "inputTokens",
+            "cachedInputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens",
+        ],
+        &format!("{label} usage"),
+    );
+}
+
+pub fn assert_limit_usage_row_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "windowId",
+            "window",
+            "windowMinutes",
+            "windowStart",
+            "resetAt",
+            "observed",
+            "groupBy",
+            "groupKey",
             "sessions",
             "calls",
             "usage",
@@ -317,27 +357,224 @@ pub fn assert_usage_diagnostics_schema(value: &Value, label: &str) {
     );
 }
 
-pub fn assert_cycle_diagnostics_schema(value: &Value, label: &str) {
+pub fn assert_limit_usage_diagnostics_schema(value: &Value, label: &str) {
     assert_has_keys(
         value,
         &[
-            "anchors",
-            "usageRecords",
-            "windows",
-            "derivedWindows",
-            "estimatedWindows",
-            "includedUsageEvents",
-            "ignoredBeforeAnchorEvents",
-            "estimateBeforeAnchor",
-            "unanchored",
-            "usageDiagnostics",
+            "observedWindows",
+            "unobservedUsageEvents",
+            "usage",
+            "rateLimits",
         ],
         label,
     );
-    assert_usage_diagnostics_schema(
-        &value["usageDiagnostics"],
-        &format!("{label} usage diagnostics"),
+    assert_usage_diagnostics_schema(&value["usage"], &format!("{label} usage"));
+    assert_limit_diagnostics_schema(&value["rateLimits"], &format!("{label} rate limits"));
+}
+
+pub fn assert_limit_sample_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "timestamp",
+            "sessionId",
+            "accountId",
+            "planType",
+            "limitId",
+            "window",
+            "windowMinutes",
+            "usedPercent",
+            "remainingPercent",
+            "resetsAt",
+        ],
+        label,
     );
+}
+
+pub fn assert_limit_window_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "id",
+            "accountId",
+            "planType",
+            "limitId",
+            "window",
+            "windowMinutes",
+            "estimatedStart",
+            "resetAt",
+            "firstSeen",
+            "lastSeen",
+            "minUsedPercent",
+            "maxUsedPercent",
+            "lastUsedPercent",
+            "sampleCount",
+            "resetKind",
+        ],
+        label,
+    );
+}
+
+pub fn assert_limit_current_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "id",
+            "status",
+            "accountId",
+            "planType",
+            "limitId",
+            "window",
+            "windowMinutes",
+            "lastSeen",
+            "usedPercent",
+            "remainingPercent",
+            "resetsAt",
+            "resetInSeconds",
+        ],
+        label,
+    );
+}
+
+pub fn assert_limit_reset_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "at",
+            "accountId",
+            "planType",
+            "limitId",
+            "window",
+            "previousUsedPercent",
+            "nextUsedPercent",
+            "previousResetsAt",
+            "nextResetsAt",
+            "earlyBySeconds",
+            "kind",
+        ],
+        label,
+    );
+}
+
+pub fn assert_limit_trend_change_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "at",
+            "window",
+            "windowMinutes",
+            "accountId",
+            "planType",
+            "limitId",
+            "usedPercent",
+            "remainingPercent",
+            "deltaUsedPercent",
+            "resetsAt",
+            "kind",
+        ],
+        label,
+    );
+}
+
+pub fn assert_limit_diagnostics_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "scanAllFiles",
+            "scannedDirectories",
+            "skippedDirectories",
+            "readFiles",
+            "skippedFiles",
+            "prefilteredFiles",
+            "tailReadFiles",
+            "tailReadHits",
+            "readLines",
+            "invalidJsonLines",
+            "rateLimitEvents",
+            "includedSamples",
+            "nullRateLimits",
+            "missingWindows",
+            "rateLimitOnlyFiles",
+            "accountMismatches",
+            "fileReadConcurrency",
+        ],
+        label,
+    );
+}
+
+pub fn assert_no_source_paths_by_default(value: &Value, label: &str) {
+    assert_no_source_evidence(value, "$", label);
+}
+
+pub fn assert_no_limit_source_leakage(stdout: &str, sandbox: &Sandbox, label: &str) {
+    for path in fixture_session_files(sandbox) {
+        let path = path.to_string_lossy();
+        assert!(
+            !stdout.contains(path.as_ref()),
+            "{label}: default output contains source session file path {path}"
+        );
+    }
+
+    for marker in [
+        "sourceEvidence",
+        "\"source\"",
+        "sourcePath",
+        "sourceLine",
+        "lineNumber",
+    ] {
+        assert!(
+            !stdout.contains(marker),
+            "{label}: default output contains source evidence marker {marker:?}"
+        );
+    }
+}
+
+fn fixture_session_files(sandbox: &Sandbox) -> Vec<PathBuf> {
+    vec![
+        sandbox
+            .sessions_dir
+            .join("2026/05/10/rollout-2026-05-10T09-00-00-rust-run-session-alpha.jsonl"),
+        sandbox
+            .sessions_dir
+            .join("2026/05/11/rollout-2026-05-11T10-00-00-rust-run-session-beta.jsonl"),
+        sandbox
+            .sessions_dir
+            .join("2026/05/12/rollout-2026-05-12T11-00-00-rust-run-session-gamma.jsonl"),
+        sandbox
+            .sessions_dir
+            .join("2026/05/12/rollout-2026-05-12T13-00-00-rust-run-session-delta.jsonl"),
+    ]
+}
+
+fn assert_no_source_evidence(value: &Value, path: &str, label: &str) {
+    const FORBIDDEN_KEYS: &[&str] = &[
+        "source",
+        "sourcePath",
+        "sourceLine",
+        "filePath",
+        "line",
+        "lineNumber",
+    ];
+
+    match value {
+        Value::Object(object) => {
+            for key in FORBIDDEN_KEYS {
+                assert!(
+                    !object.contains_key(*key),
+                    "{label}: default output contains source evidence key {key:?} at {path}"
+                );
+            }
+            for (key, child) in object {
+                assert_no_source_evidence(child, &format!("{path}.{key}"), label);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                assert_no_source_evidence(child, &format!("{path}[{index}]"), label);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn read_file_bytes(path: &Path) -> Vec<u8> {

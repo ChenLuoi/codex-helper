@@ -1,5 +1,7 @@
 use super::StatSort;
+use crate::limits::RateLimitDiagnostics;
 use crate::pricing::TokenUsage as PricingTokenUsage;
+use crate::session_scan::SessionScanDiagnostics;
 use crate::time::{local_to_utc, StatGroupBy};
 use chrono::{DateTime, Datelike, Local, SecondsFormat, Timelike, Utc};
 use serde::Serialize;
@@ -21,6 +23,43 @@ pub struct UsageRecordsReport {
     pub sessions_dir: String,
     pub records: Vec<UsageRecord>,
     pub diagnostics: UsageDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LimitUsageGroupBy {
+    Window,
+    Model,
+    Cwd,
+    Account,
+}
+
+impl LimitUsageGroupBy {
+    pub(super) fn from_stat(value: Option<StatGroupBy>) -> Self {
+        match value {
+            Some(StatGroupBy::Model) => Self::Model,
+            Some(StatGroupBy::Cwd) => Self::Cwd,
+            Some(StatGroupBy::Account) => Self::Account,
+            _ => Self::Window,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Window => "window",
+            Self::Model => "model",
+            Self::Cwd => "cwd",
+            Self::Account => "account",
+        }
+    }
+
+    pub(super) fn as_stat(self) -> Option<StatGroupBy> {
+        match self {
+            Self::Window => None,
+            Self::Model => Some(StatGroupBy::Model),
+            Self::Cwd => Some(StatGroupBy::Cwd),
+            Self::Account => Some(StatGroupBy::Account),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -206,6 +245,22 @@ impl UsageDiagnostics {
         self.skipped_events.account_mismatch += other.skipped_events.account_mismatch;
         self.skipped_events.fork_replay += other.skipped_events.fork_replay;
     }
+
+    pub(crate) fn merge_session_scan(&mut self, other: &SessionScanDiagnostics) {
+        self.scanned_directories += other.scanned_directories;
+        self.skipped_directories += other.skipped_directories;
+        self.read_files += other.read_files;
+        self.skipped_files += other.skipped_files;
+        self.prefiltered_files += other.prefiltered_files;
+        self.tail_read_files += other.tail_read_files;
+        self.tail_read_hits += other.tail_read_hits;
+        self.mtime_read_files += other.mtime_read_files;
+        self.mtime_tail_hits += other.mtime_tail_hits;
+        self.mtime_read_hits += other.mtime_read_hits;
+        self.fork_files += other.fork_files;
+        self.fork_parent_missing += other.fork_parent_missing;
+        self.fork_replay_lines += other.fork_replay_lines;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +276,52 @@ pub(super) struct UsageStatsReport {
     pub(super) totals: UsageStatRow,
     pub(super) unpriced_models: Vec<UsageUnpricedModelRow>,
     pub(super) diagnostics: Option<UsageDiagnostics>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LimitUsageRow {
+    pub(super) window_id: String,
+    pub(super) window: String,
+    pub(super) window_minutes: i64,
+    pub(super) window_start: Option<DateTime<Utc>>,
+    pub(super) reset_at: Option<DateTime<Utc>>,
+    pub(super) observed: bool,
+    pub(super) group_by: &'static str,
+    pub(super) group_key: String,
+    pub(super) sessions: usize,
+    pub(super) calls: i64,
+    pub(super) usage: TokenUsage,
+    pub(super) credits: f64,
+    pub(super) usd: f64,
+    pub(super) priced_calls: i64,
+    pub(super) unpriced_calls: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LimitUsageDiagnostics {
+    pub(super) observed_windows: i64,
+    pub(super) unobserved_usage_events: i64,
+    pub(super) usage: UsageDiagnostics,
+    pub(super) rate_limits: RateLimitDiagnostics,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LimitUsageReport {
+    pub(super) start: DateTime<Utc>,
+    pub(super) end: DateTime<Utc>,
+    pub(super) limit_window: &'static str,
+    pub(super) window_minutes: i64,
+    pub(super) group_by: LimitUsageGroupBy,
+    pub(super) include_reasoning_effort: bool,
+    pub(super) sort_by: Option<StatSort>,
+    pub(super) limit: Option<usize>,
+    pub(super) sessions_dir: String,
+    pub(super) rows: Vec<LimitUsageRow>,
+    pub(super) totals: UsageStatRow,
+    pub(super) unpriced_models: Vec<UsageUnpricedModelRow>,
+    pub(super) diagnostics: Option<LimitUsageDiagnostics>,
 }
 
 #[derive(Clone, Debug)]
@@ -320,6 +421,28 @@ pub(super) struct UsageStatsJson<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct LimitUsageJson<'a> {
+    start: String,
+    end: String,
+    limit_window: &'static str,
+    window_minutes: i64,
+    group_by: &'static str,
+    include_reasoning_effort: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sort_by: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+    sessions_dir: &'a str,
+    rows: &'a [LimitUsageRow],
+    totals: &'a UsageStatRow,
+    unpriced_models: &'a [UsageUnpricedModelRow],
+    warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<&'a LimitUsageDiagnostics>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct UsageSessionsJson<'a> {
     start: String,
     end: String,
@@ -409,6 +532,25 @@ pub(super) fn to_usage_stats_json(report: &UsageStatsReport) -> UsageStatsJson<'
     }
 }
 
+pub(super) fn to_limit_usage_json(report: &LimitUsageReport) -> LimitUsageJson<'_> {
+    LimitUsageJson {
+        start: iso_string(report.start),
+        end: iso_string(report.end),
+        limit_window: report.limit_window,
+        window_minutes: report.window_minutes,
+        group_by: report.group_by.as_str(),
+        include_reasoning_effort: report.include_reasoning_effort,
+        sort_by: report.sort_by.map(StatSort::as_str),
+        limit: report.limit,
+        sessions_dir: &report.sessions_dir,
+        rows: &report.rows,
+        totals: &report.totals,
+        unpriced_models: &report.unpriced_models,
+        warnings: limit_usage_warnings(report),
+        diagnostics: report.diagnostics.as_ref(),
+    }
+}
+
 pub(super) fn to_usage_sessions_json(report: &UsageSessionsReport) -> UsageSessionsJson<'_> {
     UsageSessionsJson {
         start: iso_string(report.start),
@@ -485,6 +627,20 @@ pub(super) fn usage_warnings(
     _diagnostics: Option<&UsageDiagnostics>,
 ) -> Vec<String> {
     Vec::new()
+}
+
+pub(super) fn limit_usage_warnings(report: &LimitUsageReport) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if report
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.unobserved_usage_events > 0)
+    {
+        warnings.push(
+            "Some usage events were not inside an observed rate-limit window and are grouped as unobserved.".to_string(),
+        );
+    }
+    warnings
 }
 
 pub(super) fn is_all_usage_range(start: DateTime<Utc>, end: DateTime<Utc>) -> bool {

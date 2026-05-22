@@ -1,4 +1,4 @@
-use crate::cycles::CycleCommandOptions;
+use crate::limits::{LimitCommand, LimitCommandOptions};
 use crate::stats::StatCommandOptions;
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -13,6 +13,7 @@ const AUTH_LIST_USAGE: &str = "codex-ops auth list [options]";
 const AUTH_SELECT_USAGE: &str = "codex-ops auth select [options]";
 const AUTH_REMOVE_USAGE: &str = "codex-ops auth remove [options]";
 const DOCTOR_USAGE: &str = "codex-ops doctor [options]";
+const LIMIT_USAGE: &str = "codex-ops limit <command> [options]";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ParsedCli {
@@ -26,7 +27,7 @@ pub enum CliCommand {
     Auth(AuthCliCommand),
     Doctor(DoctorCliCommand),
     Stat(StatCliCommand),
-    Cycle(CycleCliCommand),
+    Limit(LimitCliCommand),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -51,25 +52,9 @@ pub struct StatCliCommand {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum CycleCliCommand {
-    Add {
-        time_parts: Vec<String>,
-        options: CycleCommandOptions,
-    },
-    List {
-        options: CycleCommandOptions,
-    },
-    Remove {
-        anchor_id: String,
-        options: CycleCommandOptions,
-    },
-    Current {
-        options: CycleCommandOptions,
-    },
-    History {
-        cycle_id: Option<String>,
-        options: CycleCommandOptions,
-    },
+pub struct LimitCliCommand {
+    pub command: LimitCommand,
+    pub options: LimitCommandOptions,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -110,7 +95,6 @@ pub struct DoctorCliPaths {
     pub auth_file: Option<PathBuf>,
     pub codex_home: Option<PathBuf>,
     pub sessions_dir: Option<PathBuf>,
-    pub cycle_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -168,10 +152,10 @@ enum RootCommand {
     )]
     Stat(StatArgs),
     #[command(
-        about = "Manage Codex weekly limit cycle anchors and usage reports",
-        override_usage = "codex-ops cycle <command> [options]"
+        about = "Show Codex server rate-limit telemetry",
+        override_usage = LIMIT_USAGE
     )]
-    Cycle(CycleArgs),
+    Limit(LimitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -281,8 +265,6 @@ struct DoctorArgs {
     codex_home: Option<PathBuf>,
     #[arg(long, value_name = "path", help = "Codex sessions directory")]
     sessions_dir: Option<PathBuf>,
-    #[arg(long, value_name = "path", help = "Weekly cycle anchor store file")]
-    cycle_file: Option<PathBuf>,
     #[arg(short = 'j', long, help = "Print JSON")]
     json: bool,
 }
@@ -306,6 +288,12 @@ struct StatOptionArgs {
         help = "hour, day, week, month, model, cwd, account"
     )]
     group_by: Option<String>,
+    #[arg(
+        long,
+        value_name = "window",
+        help = "Aggregate usage by server rate-limit windows: 5h or 7d"
+    )]
+    limit_window: Option<String>,
     #[arg(
         short = 'S',
         long,
@@ -376,129 +364,67 @@ struct StatOptionArgs {
 }
 
 #[derive(Debug, Args)]
-struct CycleArgs {
+struct LimitArgs {
     #[command(subcommand)]
-    command: Option<CycleSubcommand>,
+    command: Option<LimitSubcommand>,
 }
 
 #[derive(Debug, Subcommand)]
-enum CycleSubcommand {
+enum LimitSubcommand {
     #[command(
-        about = "Add a weekly cycle anchor",
-        override_usage = "codex-ops cycle add <time...> [options]"
+        about = "Show latest observed rate-limit state",
+        override_usage = "codex-ops limit current [options]"
     )]
-    Add(CycleAddArgs),
+    Current(LimitCurrentArgs),
     #[command(
-        about = "List weekly cycle anchors",
-        override_usage = "codex-ops cycle list [options]"
+        about = "List observed rate-limit windows",
+        override_usage = "codex-ops limit windows [options]"
     )]
-    List(CycleListArgs),
+    Windows(LimitCommonArgs),
     #[command(
-        about = "Remove a weekly cycle anchor",
-        override_usage = "codex-ops cycle remove <anchor-id> [options]"
+        about = "Show rate-limit used-percent change timeline",
+        override_usage = "codex-ops limit trend [options]"
     )]
-    Remove(CycleRemoveArgs),
+    Trend(LimitCommonArgs),
     #[command(
-        about = "Show the current weekly cycle",
-        override_usage = "codex-ops cycle current [options]"
+        about = "Show detected rate-limit reset events",
+        override_usage = "codex-ops limit resets [options]"
     )]
-    Current(CycleCurrentArgs),
+    Resets(LimitResetArgs),
     #[command(
-        about = "Show weekly cycle history",
-        override_usage = "codex-ops cycle history [cycle-id] [options]"
+        about = "Export raw rate-limit samples",
+        override_usage = "codex-ops limit samples [options]"
     )]
-    History(CycleHistoryArgs),
+    Samples(LimitCommonArgs),
 }
 
 #[derive(Debug, Args)]
-struct CycleAddArgs {
-    #[arg(value_name = "time")]
-    time_parts: Vec<String>,
-    #[arg(short = 'n', long, value_name = "text", help = "Anchor note")]
-    note: Option<String>,
+struct LimitResetArgs {
     #[command(flatten)]
-    account: CycleAccountArgs,
+    common: LimitCommonArgs,
+    #[arg(long, help = "Only include resets before the prior reset time")]
+    early_only: bool,
 }
 
 #[derive(Debug, Args)]
-struct CycleListArgs {
-    #[command(flatten)]
-    account: CycleAccountArgs,
-    #[command(flatten)]
-    format: CycleFormatArgs,
-}
-
-#[derive(Debug, Args)]
-struct CycleRemoveArgs {
-    #[arg(value_name = "anchor-id")]
-    anchor_id: String,
-    #[command(flatten)]
-    account: CycleAccountArgs,
-}
-
-#[derive(Debug, Args)]
-struct CycleCurrentArgs {
-    #[command(flatten)]
-    account: CycleAccountArgs,
-    #[arg(long, value_name = "path", help = "Codex sessions directory")]
-    sessions_dir: Option<PathBuf>,
-    #[command(flatten)]
-    format: CycleFormatArgs,
-}
-
-#[derive(Debug, Args)]
-struct CycleHistoryArgs {
-    #[arg(value_name = "cycle-id")]
-    cycle_id: Option<String>,
-    #[arg(short = 'i', long, help = "Interactively select a cycle detail")]
-    select: bool,
-    #[arg(long, help = "Include estimated cycles before earliest anchor")]
-    estimate_before_anchor: bool,
-    #[command(flatten)]
-    account: CycleAccountArgs,
-    #[arg(long, value_name = "path", help = "Codex sessions directory")]
-    sessions_dir: Option<PathBuf>,
-    #[arg(short = 's', long, value_name = "time", help = "Start time")]
-    start: Option<String>,
-    #[arg(short = 'e', long, value_name = "time", help = "End time")]
-    end: Option<String>,
-    #[arg(short = 't', long, help = "Use today as the range")]
-    today: bool,
-    #[arg(long, help = "Use yesterday as the range")]
-    yesterday: bool,
-    #[arg(short = 'm', long, help = "Use the current calendar month")]
-    month: bool,
+struct LimitCurrentArgs {
+    #[arg(long, value_name = "window", help = "5h or 7d")]
+    window: Option<String>,
     #[arg(
-        short = 'L',
+        short = 'A',
         long,
-        value_name = "duration",
-        help = "Recent duration such as 12h, 7d, 2w, 1mo"
+        value_name = "id",
+        help = "Only include one account id"
     )]
-    last: Option<String>,
-    #[arg(short = 'a', long, help = "Include all session usage")]
-    all: bool,
-    #[command(flatten)]
-    format: CycleFormatArgs,
-    #[arg(short = 'v', long, help = "Show diagnostics")]
-    verbose: bool,
-}
-
-#[derive(Debug, Args)]
-struct CycleAccountArgs {
-    #[arg(short = 'A', long, value_name = "id", help = "Weekly cycle account id")]
     account_id: Option<String>,
     #[arg(long, value_name = "path", help = "Path to auth.json")]
     auth_file: Option<PathBuf>,
-    #[arg(long, value_name = "path", help = "Codex home directory")]
-    codex_home: Option<PathBuf>,
-    #[arg(long, value_name = "path", help = "Weekly cycle anchor store file")]
-    cycle_file: Option<PathBuf>,
     #[arg(long, value_name = "path", help = "Auth account history file")]
     account_history_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-struct CycleFormatArgs {
+    #[arg(long, value_name = "path", help = "Codex home directory")]
+    codex_home: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Codex sessions directory")]
+    sessions_dir: Option<PathBuf>,
     #[arg(
         short = 'f',
         long,
@@ -508,6 +434,51 @@ struct CycleFormatArgs {
     format: Option<String>,
     #[arg(short = 'j', long, help = "Print JSON")]
     json: bool,
+    #[arg(short = 'v', long, help = "Show diagnostics")]
+    verbose: bool,
+}
+
+#[derive(Debug, Args)]
+struct LimitCommonArgs {
+    #[arg(long, value_name = "window", help = "5h or 7d")]
+    window: Option<String>,
+    #[arg(
+        short = 'A',
+        long,
+        value_name = "id",
+        help = "Only include one account id"
+    )]
+    account_id: Option<String>,
+    #[arg(long, value_name = "path", help = "Path to auth.json")]
+    auth_file: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Auth account history file")]
+    account_history_file: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Codex home directory")]
+    codex_home: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Codex sessions directory")]
+    sessions_dir: Option<PathBuf>,
+    #[arg(short = 's', long, value_name = "time", help = "Start time")]
+    start: Option<String>,
+    #[arg(short = 'e', long, value_name = "time", help = "End time")]
+    end: Option<String>,
+    #[arg(
+        short = 'L',
+        long,
+        value_name = "duration",
+        help = "Recent duration such as 12h, 30d, 2w, 1mo"
+    )]
+    last: Option<String>,
+    #[arg(
+        short = 'f',
+        long,
+        value_name = "format",
+        help = "table, json, csv, markdown"
+    )]
+    format: Option<String>,
+    #[arg(short = 'j', long, help = "Print JSON")]
+    json: bool,
+    #[arg(short = 'v', long, help = "Show diagnostics")]
+    verbose: bool,
 }
 
 pub fn parse_cli(args: &[String]) -> Result<ParsedCli, CliParseError> {
@@ -537,7 +508,7 @@ impl CliArgs {
             Some(RootCommand::Stat(args)) => {
                 Ok(parsed_command(CliCommand::Stat(stat_command(args)?)))
             }
-            Some(RootCommand::Cycle(args)) => cycle_command(args),
+            Some(RootCommand::Limit(args)) => limit_command(args),
         }
     }
 }
@@ -599,7 +570,6 @@ fn doctor_options(args: DoctorArgs) -> Result<DoctorCliOptions, CliParseError> {
             auth_file: resolve_cli_path(args.auth_file)?,
             codex_home: args.codex_home,
             sessions_dir: args.sessions_dir,
-            cycle_file: resolve_cli_path(args.cycle_file)?,
         },
         json: args.json,
     })
@@ -618,6 +588,7 @@ fn stat_options(args: StatOptionArgs) -> Result<StatCommandOptions, CliParseErro
         start: args.start,
         end: args.end,
         group_by: args.group_by,
+        limit_window: args.limit_window,
         format: args.format,
         codex_home: args.codex_home,
         sessions_dir: args.sessions_dir,
@@ -640,126 +611,70 @@ fn stat_options(args: StatOptionArgs) -> Result<StatCommandOptions, CliParseErro
     })
 }
 
-fn cycle_command(args: CycleArgs) -> Result<ParsedCli, CliParseError> {
+fn limit_command(args: LimitArgs) -> Result<ParsedCli, CliParseError> {
     let command = match args.command {
-        None => return Ok(ParsedCli::Help(cycle_help())),
-        Some(CycleSubcommand::Add(args)) => CycleCliCommand::Add {
-            time_parts: args.time_parts,
-            options: cycle_options(args.account, None, None, None, args.note, None, None)?,
+        None => return Ok(ParsedCli::Help(limit_help())),
+        Some(LimitSubcommand::Current(args)) => LimitCliCommand {
+            command: LimitCommand::Current,
+            options: limit_current_options(args)?,
         },
-        Some(CycleSubcommand::List(args)) => CycleCliCommand::List {
-            options: cycle_options(
-                args.account,
-                None,
-                None,
-                Some(args.format),
-                None,
-                None,
-                None,
-            )?,
+        Some(LimitSubcommand::Windows(args)) => LimitCliCommand {
+            command: LimitCommand::Windows,
+            options: limit_options(args, None)?,
         },
-        Some(CycleSubcommand::Remove(args)) => CycleCliCommand::Remove {
-            anchor_id: args.anchor_id,
-            options: cycle_options(args.account, None, None, None, None, None, None)?,
+        Some(LimitSubcommand::Trend(args)) => LimitCliCommand {
+            command: LimitCommand::Trend,
+            options: limit_options(args, None)?,
         },
-        Some(CycleSubcommand::Current(args)) => CycleCliCommand::Current {
-            options: cycle_options(
-                args.account,
-                args.sessions_dir,
-                None,
-                Some(args.format),
-                None,
-                None,
-                None,
-            )?,
+        Some(LimitSubcommand::Resets(args)) => LimitCliCommand {
+            command: LimitCommand::Resets,
+            options: limit_options(args.common, Some(args.early_only))?,
         },
-        Some(CycleSubcommand::History(args)) => CycleCliCommand::History {
-            cycle_id: args.cycle_id,
-            options: cycle_options(
-                args.account,
-                args.sessions_dir,
-                Some(CycleHistoryRangeArgs {
-                    start: args.start,
-                    end: args.end,
-                    today: args.today,
-                    yesterday: args.yesterday,
-                    month: args.month,
-                    last: args.last,
-                    all: args.all,
-                    verbose: args.verbose,
-                }),
-                Some(args.format),
-                None,
-                Some(args.select),
-                Some(args.estimate_before_anchor),
-            )?,
+        Some(LimitSubcommand::Samples(args)) => LimitCliCommand {
+            command: LimitCommand::Samples,
+            options: limit_options(args, None)?,
         },
     };
 
-    Ok(parsed_command(CliCommand::Cycle(command)))
+    Ok(parsed_command(CliCommand::Limit(command)))
 }
 
-struct CycleHistoryRangeArgs {
-    start: Option<String>,
-    end: Option<String>,
-    today: bool,
-    yesterday: bool,
-    month: bool,
-    last: Option<String>,
-    all: bool,
-    verbose: bool,
+fn limit_current_options(args: LimitCurrentArgs) -> Result<LimitCommandOptions, CliParseError> {
+    Ok(LimitCommandOptions {
+        start: None,
+        end: None,
+        last: None,
+        format: args.format,
+        codex_home: args.codex_home,
+        sessions_dir: args.sessions_dir,
+        auth_file: resolve_cli_path(args.auth_file)?,
+        account_history_file: resolve_cli_path(args.account_history_file)?,
+        account_id: args.account_id,
+        window: args.window,
+        early_only: false,
+        json: args.json,
+        verbose: args.verbose,
+    })
 }
 
-fn cycle_options(
-    account: CycleAccountArgs,
-    sessions_dir: Option<PathBuf>,
-    history: Option<CycleHistoryRangeArgs>,
-    format: Option<CycleFormatArgs>,
-    note: Option<String>,
-    select: Option<bool>,
-    estimate_before_anchor: Option<bool>,
-) -> Result<CycleCommandOptions, CliParseError> {
-    let auth_file = resolve_cli_path(account.auth_file)?;
-    let cycle_file = resolve_cli_path(account.cycle_file)?;
-    let account_history_file = resolve_cli_path(account.account_history_file)?;
-    let mut stat = StatCommandOptions {
-        auth_file: auth_file.clone(),
-        codex_home: account.codex_home.clone(),
-        sessions_dir: sessions_dir.clone(),
-        account_history_file: account_history_file.clone(),
-        account_id: account.account_id.clone(),
-        ..StatCommandOptions::default()
-    };
-
-    if let Some(history) = history {
-        stat.start = history.start;
-        stat.end = history.end;
-        stat.today = history.today;
-        stat.yesterday = history.yesterday;
-        stat.month = history.month;
-        stat.last = history.last;
-        stat.all = history.all;
-        stat.verbose = history.verbose;
-    }
-
-    let (format, json) = format
-        .map(|format| (format.format, format.json))
-        .unwrap_or((None, false));
-    stat.json = json;
-
-    Ok(CycleCommandOptions {
-        auth_file,
-        codex_home: account.codex_home,
-        cycle_file,
-        account_history_file,
-        sessions_dir,
-        account_id: account.account_id,
-        note,
-        format,
-        json,
-        select: select.unwrap_or(false),
-        estimate_before_anchor: estimate_before_anchor.unwrap_or(false),
-        stat,
+fn limit_options(
+    args: LimitCommonArgs,
+    early_only: Option<bool>,
+) -> Result<LimitCommandOptions, CliParseError> {
+    Ok(LimitCommandOptions {
+        start: args.start,
+        end: args.end,
+        last: args.last,
+        format: args.format,
+        codex_home: args.codex_home,
+        sessions_dir: args.sessions_dir,
+        auth_file: resolve_cli_path(args.auth_file)?,
+        account_history_file: resolve_cli_path(args.account_history_file)?,
+        account_id: args.account_id,
+        window: args.window,
+        early_only: early_only.unwrap_or(false),
+        json: args.json,
+        verbose: args.verbose,
     })
 }
 
@@ -790,12 +705,12 @@ fn auth_help() -> String {
     auth.render_help().to_string()
 }
 
-fn cycle_help() -> String {
+fn limit_help() -> String {
     let mut command = CliArgs::command();
-    let cycle = command
-        .find_subcommand_mut("cycle")
-        .expect("cycle subcommand is defined");
-    cycle.render_help().to_string()
+    let limit = command
+        .find_subcommand_mut("limit")
+        .expect("limit subcommand is defined");
+    limit.render_help().to_string()
 }
 
 #[cfg(test)]
@@ -828,9 +743,8 @@ mod tests {
     #[test]
     fn resolves_path_options_from_equals_flags() {
         let args = vec![
-            "cycle".to_string(),
-            "history".to_string(),
-            "--cycle-file=fixtures/cycles.json".to_string(),
+            "limit".to_string(),
+            "samples".to_string(),
             "--account-history-file=fixtures/history.json".to_string(),
         ];
 
@@ -838,12 +752,11 @@ mod tests {
         let ParsedCli::Command(command) = parsed else {
             panic!("expected command");
         };
-        let CliCommand::Cycle(CycleCliCommand::History { options, .. }) = *command else {
-            panic!("expected cycle history");
+        let CliCommand::Limit(LimitCliCommand { options, .. }) = *command else {
+            panic!("expected limit samples");
         };
         let cwd = env::current_dir().expect("cwd");
 
-        assert_eq!(options.cycle_file, Some(cwd.join("fixtures/cycles.json")));
         assert_eq!(
             options.account_history_file,
             Some(cwd.join("fixtures/history.json"))

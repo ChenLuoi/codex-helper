@@ -1,6 +1,9 @@
 mod common;
 
-use common::{assert_failure_contains, assert_help, run_codex_ops, Sandbox};
+use common::{
+    assert_contains, assert_failure_contains, assert_help, assert_not_contains, assert_success,
+    run_codex_ops, Sandbox,
+};
 
 #[test]
 fn help_is_generated_for_root_and_subcommands() {
@@ -11,11 +14,14 @@ fn help_is_generated_for_root_and_subcommands() {
         &[
             "Usage: codex-ops <command> [options]",
             "auth    Show and manage Codex authentication information",
-            "cycle   Manage Codex weekly limit cycle anchors and usage reports",
+            "limit   Show Codex server rate-limit telemetry",
         ],
         &sandbox,
         "root help",
     );
+    let root_help = run_codex_ops(["--help"], &sandbox);
+    assert_success(&root_help, "root help no cycle");
+    assert_not_contains(&root_help.stdout, "cycle", "root help no cycle");
     assert_help(
         &["auth", "--help"],
         &[
@@ -86,12 +92,21 @@ fn help_is_generated_for_root_and_subcommands() {
         &sandbox,
         "doctor help",
     );
+    let doctor_help = run_codex_ops(["doctor", "--help"], &sandbox);
+    assert_success(&doctor_help, "doctor help no cycle file");
+    assert_not_contains(
+        &doctor_help.stdout,
+        "cycle-file",
+        "doctor help no cycle file",
+    );
     assert_help(
         &["stat", "--help"],
         &[
             "Usage: codex-ops stat [view] [session] [options]",
             "Arguments:",
             "-g, --group-by <group>",
+            "--limit-window <window>",
+            "server rate-limit windows",
             "-L, --last <duration>",
         ],
         &sandbox,
@@ -108,64 +123,154 @@ fn help_is_generated_for_root_and_subcommands() {
         "stat sessions help",
     );
     assert_help(
-        &["cycle", "--help"],
+        &["limit", "--help"],
         &[
-            "Usage: codex-ops cycle <command> [options]",
-            "current  Show the current weekly cycle",
-            "history  Show weekly cycle history",
+            "Usage: codex-ops limit <command> [options]",
+            "current  Show latest observed rate-limit state",
+            "samples  Export raw rate-limit samples",
         ],
         &sandbox,
-        "cycle help",
+        "limit help",
     );
     assert_help(
-        &["cycle", "add", "--help"],
+        &["limit", "trend", "--help"],
         &[
-            "Usage: codex-ops cycle add <time...> [options]",
-            "-n, --note <text>",
-            "--account-history-file <path>",
-        ],
-        &sandbox,
-        "cycle add help",
-    );
-    assert_help(
-        &["cycle", "list", "--help"],
-        &[
-            "Usage: codex-ops cycle list [options]",
+            "Usage: codex-ops limit trend [options]",
+            "--window <window>",
             "-f, --format <format>",
+        ],
+        &sandbox,
+        "limit trend help",
+    );
+    assert_help(
+        &["limit", "current", "--help"],
+        &[
+            "Usage: codex-ops limit current [options]",
+            "--sessions-dir <path>",
+            "--window <window>",
+        ],
+        &sandbox,
+        "limit current help",
+    );
+    let current_help = run_codex_ops(["limit", "current", "--help"], &sandbox);
+    assert_success(&current_help, "limit current help without ranges");
+    assert_not_contains(
+        &current_help.stdout,
+        "--start",
+        "limit current should not expose start option",
+    );
+    assert_not_contains(
+        &current_help.stdout,
+        "--last",
+        "limit current should not expose last option",
+    );
+    assert_help(
+        &["limit", "windows", "--help"],
+        &[
+            "Usage: codex-ops limit windows [options]",
+            "--window <window>",
+            "-f, --format <format>",
+        ],
+        &sandbox,
+        "limit windows help",
+    );
+    assert_help(
+        &["limit", "resets", "--help"],
+        &[
+            "Usage: codex-ops limit resets [options]",
+            "--early-only",
+            "--window <window>",
+        ],
+        &sandbox,
+        "limit resets help",
+    );
+    assert_help(
+        &["limit", "samples", "--help"],
+        &[
+            "Usage: codex-ops limit samples [options]",
+            "--window <window>",
             "-j, --json",
         ],
         &sandbox,
-        "cycle list help",
+        "limit samples help",
     );
-    assert_help(
-        &["cycle", "remove", "--help"],
-        &[
-            "Usage: codex-ops cycle remove <anchor-id> [options]",
-            "<anchor-id>",
-            "--cycle-file <path>",
+}
+
+#[test]
+fn stat_limit_window_parser_contract_is_fixed() {
+    let sandbox = Sandbox::new();
+
+    let bad_window = run_codex_ops(["stat", "--limit-window", "bogus"], &sandbox);
+    assert_failure_contains(&bad_window, 2, "5h", "stat invalid limit window");
+    assert_contains(&bad_window.stderr, "7d", "stat invalid limit window");
+
+    let sessions = run_codex_ops(["stat", "sessions", "--limit-window", "7d"], &sandbox);
+    assert_failure_contains(
+        &sessions,
+        2,
+        "stat sessions does not support --limit-window",
+        "stat sessions rejects limit window",
+    );
+
+    let time_group = run_codex_ops(
+        ["stat", "--limit-window", "7d", "--group-by", "day"],
+        &sandbox,
+    );
+    assert_failure_contains(
+        &time_group,
+        2,
+        "--group-by model, cwd, or account",
+        "stat limit window rejects time group",
+    );
+
+    let model_group = run_codex_ops(
+        [
+            "stat",
+            "--limit-window",
+            "7d",
+            "--group-by",
+            "model",
+            "--all",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
         ],
         &sandbox,
-        "cycle remove help",
     );
-    assert_help(
-        &["cycle", "current", "--help"],
-        &[
-            "Usage: codex-ops cycle current [options]",
-            "--sessions-dir <path>",
-            "-f, --format <format>",
-        ],
-        &sandbox,
-        "cycle current help",
+    common::assert_success(&model_group, "stat limit window accepts model group");
+}
+
+#[test]
+fn limit_trend_rejects_removed_group_by_option() {
+    let sandbox = Sandbox::new();
+
+    let old_group_by = run_codex_ops(["limit", "trend", "--group-by", "hour"], &sandbox);
+    assert_failure_contains(
+        &old_group_by,
+        2,
+        "unexpected argument '--group-by'",
+        "limit trend rejects old group-by",
     );
-    assert_help(
-        &["cycle", "history", "--help"],
-        &[
-            "Usage: codex-ops cycle history [cycle-id] [options]",
-            "-i, --select",
-            "--estimate-before-anchor",
-        ],
-        &sandbox,
-        "cycle history help",
+}
+
+#[test]
+fn limit_current_rejects_date_range_options() {
+    let sandbox = Sandbox::new();
+
+    let start = run_codex_ops(["limit", "current", "--start", "2026-05-01"], &sandbox);
+    assert_failure_contains(
+        &start,
+        2,
+        "unexpected argument '--start'",
+        "limit current rejects start",
+    );
+
+    let last = run_codex_ops(["limit", "current", "--last", "30d"], &sandbox);
+    assert_failure_contains(
+        &last,
+        2,
+        "unexpected argument '--last'",
+        "limit current rejects last",
     );
 }
 
@@ -195,6 +300,14 @@ fn parser_errors_keep_stderr_only_contract() {
         2,
         "unrecognized subcommand 'missing'",
         "unknown auth command",
+    );
+
+    let removed_cycle = run_codex_ops(["cycle", "current"], &sandbox);
+    assert_failure_contains(
+        &removed_cycle,
+        2,
+        "unrecognized subcommand 'cycle'",
+        "removed cycle command",
     );
 
     let unknown_auth_option = run_codex_ops(["auth", "status", "--bogus"], &sandbox);

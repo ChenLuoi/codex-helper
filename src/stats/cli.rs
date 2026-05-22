@@ -1,26 +1,34 @@
 use super::accumulators::{
-    UsageSessionDetailAccumulator, UsageSessionsAccumulator, UsageStatsAccumulator,
+    LimitUsageAccumulator, LimitUsageAccumulatorConfig, UsageSessionDetailAccumulator,
+    UsageSessionsAccumulator, UsageStatsAccumulator,
 };
-use super::formatters::{format_usage_session_detail, format_usage_sessions, format_usage_stats};
+use super::formatters::{
+    format_limit_usage, format_usage_session_detail, format_usage_sessions, format_usage_stats,
+};
 use super::reports::{
-    UsageRecordsReadOptions, UsageRecordsReport, UsageSessionDetailReport, UsageSessionsReport,
-    UsageStatsReport,
+    LimitUsageGroupBy, LimitUsageReport, UsageRecordsReadOptions, UsageRecordsReport,
+    UsageSessionDetailReport, UsageSessionsReport, UsageStatsReport,
 };
 use super::scan::{process_usage_records, process_usage_records_parallel};
 use super::{StatFormat, StatSort};
-use crate::account_history::{self, AccountHistoryAccount, UsageAccountHistory};
-use crate::auth::{read_codex_auth_status, AuthCommandOptions};
+use crate::account_history::{self, UsageAccountHistory};
+use crate::auth::{ensure_usage_account_history, AuthCommandOptions};
 use crate::error::AppError;
+use crate::limits::{
+    build_limit_windows_report, read_rate_limit_samples_report, LimitReportOptions,
+    LimitWindowSelector, RateLimitSamplesReadOptions,
+};
 use crate::storage::{path_to_string, resolve_storage_paths, StorageOptions};
 use crate::time::{self, RawRangeOptions, StatGroupBy};
-use chrono::{DateTime, Utc};
-use std::path::{Path, PathBuf};
+use chrono::{DateTime, Duration, Utc};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct StatCommandOptions {
     pub start: Option<String>,
     pub end: Option<String>,
     pub group_by: Option<String>,
+    pub limit_window: Option<String>,
     pub format: Option<String>,
     pub codex_home: Option<PathBuf>,
     pub sessions_dir: Option<PathBuf>,
@@ -47,8 +55,11 @@ pub(super) struct ResolvedStatOptions {
     pub(super) start: DateTime<Utc>,
     pub(super) end: DateTime<Utc>,
     pub(super) group_by: StatGroupBy,
+    pub(super) limit_window: Option<LimitWindowSelector>,
+    pub(super) limit_group_by: Option<StatGroupBy>,
     pub(super) format: StatFormat,
     pub(super) sessions_dir: PathBuf,
+    pub(super) account_history_file: Option<PathBuf>,
     pub(super) sort_by: Option<StatSort>,
     pub(super) limit: Option<usize>,
     pub(super) include_reasoning_effort: bool,
@@ -91,7 +102,6 @@ pub fn resolve_stat_range_options_from_raw(
         auth_file: raw.auth_file.clone(),
         profile_store_dir: None,
         account_history_file: raw.account_history_file.clone(),
-        cycle_file: None,
         sessions_dir: raw.sessions_dir.clone(),
     });
 
@@ -116,8 +126,11 @@ pub fn read_usage_records_report(
         start: options.start,
         end: options.end,
         group_by: StatGroupBy::Day,
+        limit_window: None,
+        limit_group_by: None,
         format: StatFormat::Json,
         sessions_dir: options.sessions_dir.clone(),
+        account_history_file: options.account_history_file.clone(),
         sort_by: None,
         limit: None,
         include_reasoning_effort: false,
@@ -147,10 +160,20 @@ pub fn run_stat_command(
     match view {
         None => {
             let resolved = resolve_stat_options(&options, now, false)?;
-            let report = read_usage_stats(&resolved)?;
-            format_usage_stats(&report, resolved.format, resolved.verbose)
+            if resolved.limit_window.is_some() {
+                let report = read_limit_usage_stats(&resolved)?;
+                format_limit_usage(&report, resolved.format, resolved.verbose)
+            } else {
+                let report = read_usage_stats(&resolved)?;
+                format_usage_stats(&report, resolved.format, resolved.verbose)
+            }
         }
         Some("sessions") => {
+            if options.limit_window.is_some() {
+                return Err(AppError::invalid_input(
+                    "stat sessions does not support --limit-window. Use stat --limit-window 5h or 7d without a view.",
+                ));
+            }
             let mut resolved = resolve_stat_options(&options, now, session.is_some())?;
             if let Some(session_id) = session {
                 resolved.scan_all_files = true;
@@ -209,8 +232,19 @@ fn resolve_stat_options(
         ));
     }
 
-    let group_by = match raw.group_by.as_deref() {
-        Some(value) => StatGroupBy::parse(value)?,
+    let explicit_group_by = match raw.group_by.as_deref() {
+        Some(value) => Some(StatGroupBy::parse(value)?),
+        None => None,
+    };
+    let limit_window = match raw.limit_window.as_deref() {
+        Some(value) => Some(LimitWindowSelector::parse(value)?),
+        None => None,
+    };
+    if limit_window.is_some() {
+        validate_limit_window_group_by(explicit_group_by)?;
+    }
+    let group_by = match explicit_group_by {
+        Some(value) => value,
         None => time::resolve_group_by(None, &range_options, &range)?,
     };
     let sort_by = match raw.sort.as_deref() {
@@ -226,17 +260,23 @@ fn resolve_stat_options(
         auth_file: raw.auth_file.clone(),
         profile_store_dir: None,
         account_history_file: raw.account_history_file.clone(),
-        cycle_file: None,
         sessions_dir: raw.sessions_dir.clone(),
     });
     let account_id = normalize_optional_account_id(raw.account_id.as_deref());
-    let needs_account_history = account_id.is_some() || group_by == StatGroupBy::Account;
-    let account_history = if needs_account_history {
+    let needs_required_account_history = account_id.is_some() || group_by == StatGroupBy::Account;
+    let account_history = if needs_required_account_history {
         Some(ensure_usage_account_history(
             &paths.account_history_file,
-            raw,
+            &AuthCommandOptions {
+                auth_file: raw.auth_file.clone(),
+                codex_home: raw.codex_home.clone(),
+                store_dir: None,
+                account_history_file: raw.account_history_file.clone(),
+            },
             now,
         )?)
+    } else if limit_window.is_some() {
+        account_history::read_optional_usage_account_history(&paths.account_history_file)?
     } else {
         None
     };
@@ -245,8 +285,11 @@ fn resolve_stat_options(
         start: range.start,
         end: range.end,
         group_by,
+        limit_window,
+        limit_group_by: limit_window.and(explicit_group_by),
         format,
         sessions_dir: paths.sessions_dir,
+        account_history_file: Some(paths.account_history_file),
         sort_by,
         limit,
         include_reasoning_effort: raw.reasoning_effort,
@@ -255,6 +298,56 @@ fn resolve_stat_options(
         account_id,
         account_history,
     })
+}
+
+fn validate_limit_window_group_by(group_by: Option<StatGroupBy>) -> Result<(), AppError> {
+    match group_by {
+        Some(StatGroupBy::Hour | StatGroupBy::Day | StatGroupBy::Week | StatGroupBy::Month) => {
+            Err(AppError::invalid_input(
+                "--limit-window can only be combined with --group-by model, cwd, or account. Time groupings hour, day, week, and month are not supported.",
+            ))
+        }
+        Some(StatGroupBy::Model | StatGroupBy::Cwd | StatGroupBy::Account) | None => Ok(()),
+    }
+}
+
+fn read_limit_usage_stats(options: &ResolvedStatOptions) -> Result<LimitUsageReport, AppError> {
+    let selector = options
+        .limit_window
+        .expect("limit usage report requires limit window");
+    let sample_start = options
+        .start
+        .checked_sub_signed(Duration::minutes(selector.window_minutes()))
+        .unwrap_or(options.start);
+    let samples = read_rate_limit_samples_report(&RateLimitSamplesReadOptions {
+        start: sample_start,
+        end: options.end,
+        sessions_dir: options.sessions_dir.clone(),
+        scan_all_files: options.scan_all_files,
+        account_history_file: options.account_history_file.clone(),
+        account_id: options.account_id.clone(),
+        plan_type: None,
+        window_minutes: Some(selector.window_minutes()),
+    })?;
+    let windows = build_limit_windows_report(&samples, LimitReportOptions::default())
+        .windows
+        .into_iter()
+        .filter(|window| window.reset_at > options.start && window.estimated_start <= options.end)
+        .collect();
+    let accumulator = LimitUsageAccumulator::new(LimitUsageAccumulatorConfig {
+        start: options.start,
+        end: options.end,
+        selector,
+        group_by: LimitUsageGroupBy::from_stat(options.limit_group_by),
+        sessions_dir: path_to_string(&options.sessions_dir),
+        include_reasoning_effort: options.include_reasoning_effort,
+        sort_by: options.sort_by,
+        limit: options.limit,
+        windows,
+    });
+    let rate_limit_diagnostics = samples.diagnostics;
+    let (accumulator, usage_diagnostics) = process_usage_records_parallel(options, accumulator)?;
+    Ok(accumulator.finish(usage_diagnostics, rate_limit_diagnostics))
 }
 
 fn read_usage_stats(options: &ResolvedStatOptions) -> Result<UsageStatsReport, AppError> {
@@ -299,43 +392,6 @@ fn read_usage_session_detail(
     );
     let (accumulator, diagnostics) = process_usage_records_parallel(options, accumulator)?;
     Ok(accumulator.finish(Some(diagnostics)))
-}
-
-fn ensure_usage_account_history(
-    account_history_file: &Path,
-    raw: &StatCommandOptions,
-    now: DateTime<Utc>,
-) -> Result<UsageAccountHistory, AppError> {
-    let mut store = account_history::read_account_history_store(account_history_file)?;
-    if store.default_account.is_none() {
-        let report = read_codex_auth_status(
-            &AuthCommandOptions {
-                auth_file: raw.auth_file.clone(),
-                codex_home: raw.codex_home.clone(),
-                store_dir: None,
-                account_history_file: raw.account_history_file.clone(),
-            },
-            now,
-        )?;
-        let account_id = report
-            .summary
-            .chatgpt_account_id
-            .clone()
-            .or(report.summary.token_account_id.clone())
-            .ok_or_else(|| AppError::new("No account id found in auth.json."))?;
-        store = account_history::ensure_default_account_in_file(
-            account_history_file,
-            AccountHistoryAccount::auth_json(
-                account_id,
-                now,
-                report.summary.name.clone(),
-                report.summary.email.clone(),
-                report.summary.plan_type.clone(),
-            ),
-        )?;
-    }
-    account_history::usage_account_history_from_store(store)?
-        .ok_or_else(|| AppError::new("No account history default account found."))
 }
 
 fn normalize_optional_account_id(value: Option<&str>) -> Option<String> {
@@ -394,5 +450,84 @@ mod tests {
         assert!(resolved.include_reasoning_effort);
         assert!(resolved.scan_all_files);
         assert_eq!(resolved.format, StatFormat::Json);
+    }
+
+    #[test]
+    fn validates_limit_window_contract_without_changing_default_group_by() {
+        let now = DateTime::parse_from_rfc3339("2026-05-17T00:00:00.000Z")
+            .expect("now")
+            .with_timezone(&Utc);
+        let default_group = resolve_stat_options(&StatCommandOptions::default(), now, false)
+            .expect("default resolve")
+            .group_by;
+
+        let limit_default_group = resolve_stat_options(
+            &StatCommandOptions {
+                limit_window: Some("7d".to_string()),
+                ..StatCommandOptions::default()
+            },
+            now,
+            false,
+        )
+        .expect("limit window default resolve")
+        .group_by;
+
+        assert_eq!(limit_default_group, default_group);
+
+        let model_group = resolve_stat_options(
+            &StatCommandOptions {
+                limit_window: Some("7d".to_string()),
+                group_by: Some("model".to_string()),
+                ..StatCommandOptions::default()
+            },
+            now,
+            false,
+        )
+        .expect("model group is compatible");
+        assert_eq!(model_group.group_by, StatGroupBy::Model);
+
+        let bad_group = resolve_stat_options(
+            &StatCommandOptions {
+                limit_window: Some("7d".to_string()),
+                group_by: Some("day".to_string()),
+                ..StatCommandOptions::default()
+            },
+            now,
+            false,
+        )
+        .expect_err("time group is incompatible");
+        assert!(bad_group.message().contains("model, cwd, or account"));
+
+        let bad_window = resolve_stat_options(
+            &StatCommandOptions {
+                limit_window: Some("bogus".to_string()),
+                ..StatCommandOptions::default()
+            },
+            now,
+            false,
+        )
+        .expect_err("unknown limit window");
+        assert!(bad_window.message().contains("5h"));
+        assert!(bad_window.message().contains("7d"));
+    }
+
+    #[test]
+    fn limit_window_group_by_compatibility_is_explicit() {
+        for group_by in [StatGroupBy::Model, StatGroupBy::Cwd, StatGroupBy::Account] {
+            validate_limit_window_group_by(Some(group_by)).expect("allowed stat group");
+        }
+
+        for group_by in [
+            StatGroupBy::Hour,
+            StatGroupBy::Day,
+            StatGroupBy::Week,
+            StatGroupBy::Month,
+        ] {
+            let error =
+                validate_limit_window_group_by(Some(group_by)).expect_err("time group rejected");
+            assert!(error.message().contains("model, cwd, or account"));
+        }
+
+        validate_limit_window_group_by(None).expect("omitted group-by is valid");
     }
 }

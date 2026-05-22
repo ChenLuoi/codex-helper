@@ -1,10 +1,12 @@
 use super::reports::{
-    TokenUsage, UsageDiagnostics, UsageRecordView, UsageSessionDetailReport, UsageSessionEventRow,
+    LimitUsageDiagnostics, LimitUsageGroupBy, LimitUsageReport, LimitUsageRow, TokenUsage,
+    UsageDiagnostics, UsageRecordView, UsageSessionDetailReport, UsageSessionEventRow,
     UsageSessionRow, UsageSessionsReport, UsageStatRow, UsageStatsReport, UsageUnpricedModelRow,
 };
 use super::scan::UsageRecordAccumulator;
 use super::StatSort;
 use crate::format::{credits_to_usd, round_credits};
+use crate::limits::{LimitWindow, LimitWindowSelector, RateLimitDiagnostics};
 use crate::pricing::{calculate_credit_cost, normalize_model_name};
 use crate::time::StatGroupBy;
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
@@ -13,6 +15,23 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 struct MutableStatRow {
+    sessions: HashSet<String>,
+    calls: i64,
+    usage: TokenUsage,
+    credits: f64,
+    priced_calls: i64,
+    unpriced_calls: i64,
+}
+
+struct MutableLimitUsageRow {
+    window_id: String,
+    window: String,
+    window_minutes: i64,
+    window_start: Option<DateTime<Utc>>,
+    reset_at: Option<DateTime<Utc>>,
+    observed: bool,
+    group_by: LimitUsageGroupBy,
+    group_key: String,
     sessions: HashSet<String>,
     calls: i64,
     usage: TokenUsage,
@@ -191,6 +210,254 @@ impl UsageRecordAccumulator for UsageStatsAccumulator {
         self.totals.add(&other.totals);
         self.calls += other.calls;
         merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
+    }
+}
+
+pub(super) struct LimitUsageAccumulator {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    selector: LimitWindowSelector,
+    group_by: LimitUsageGroupBy,
+    sessions_dir: String,
+    include_reasoning_effort: bool,
+    sort_by: Option<StatSort>,
+    limit: Option<usize>,
+    windows: Vec<LimitWindow>,
+    rows: HashMap<String, MutableLimitUsageRow>,
+    total_sessions: HashSet<String>,
+    totals: TokenUsage,
+    calls: i64,
+    credits: f64,
+    priced_calls: i64,
+    unpriced_calls: i64,
+    unpriced_models: HashMap<String, UsageUnpricedModelRow>,
+    unobserved_usage_events: i64,
+}
+
+pub(super) struct LimitUsageAccumulatorConfig {
+    pub(super) start: DateTime<Utc>,
+    pub(super) end: DateTime<Utc>,
+    pub(super) selector: LimitWindowSelector,
+    pub(super) group_by: LimitUsageGroupBy,
+    pub(super) sessions_dir: String,
+    pub(super) include_reasoning_effort: bool,
+    pub(super) sort_by: Option<StatSort>,
+    pub(super) limit: Option<usize>,
+    pub(super) windows: Vec<LimitWindow>,
+}
+
+impl LimitUsageAccumulator {
+    pub(super) fn new(config: LimitUsageAccumulatorConfig) -> Self {
+        let LimitUsageAccumulatorConfig {
+            start,
+            end,
+            selector,
+            group_by,
+            sessions_dir,
+            include_reasoning_effort,
+            sort_by,
+            limit,
+            mut windows,
+        } = config;
+
+        windows.sort_by(|left, right| {
+            left.reset_at
+                .cmp(&right.reset_at)
+                .then_with(|| left.estimated_start.cmp(&right.estimated_start))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        Self {
+            start,
+            end,
+            selector,
+            group_by,
+            sessions_dir,
+            include_reasoning_effort,
+            sort_by,
+            limit,
+            windows,
+            rows: HashMap::new(),
+            total_sessions: HashSet::new(),
+            totals: TokenUsage::default(),
+            calls: 0,
+            credits: 0.0,
+            priced_calls: 0,
+            unpriced_calls: 0,
+            unpriced_models: HashMap::new(),
+            unobserved_usage_events: 0,
+        }
+    }
+
+    pub(super) fn add(&mut self, record: UsageRecordView<'_>) {
+        let window = self.window_for_record(&record).cloned();
+        if window.is_none() {
+            self.unobserved_usage_events += 1;
+        }
+
+        let group_key = limit_usage_group_key(
+            &record,
+            self.group_by,
+            self.include_reasoning_effort,
+            window.as_ref(),
+        );
+        let row_key = limit_usage_row_key(self.selector, window.as_ref(), &group_key);
+        let row = self.rows.entry(row_key).or_insert_with(|| {
+            mutable_limit_usage_row(self.selector, self.group_by, window.as_ref(), group_key)
+        });
+        let cost = calculate_credit_cost(record.model, record.usage.pricing_usage());
+
+        row.sessions.insert(record.session_id.to_string());
+        row.calls += 1;
+        row.usage.add(record.usage);
+        row.credits += cost.credits;
+        if cost.priced {
+            row.priced_calls += 1;
+        } else {
+            row.unpriced_calls += 1;
+            add_unpriced_model(
+                &mut self.unpriced_models,
+                record.model,
+                record.usage,
+                cost.unpriced_reason,
+            );
+        }
+
+        self.total_sessions.insert(record.session_id.to_string());
+        self.totals.add(record.usage);
+        self.calls += 1;
+        self.credits += cost.credits;
+        if cost.priced {
+            self.priced_calls += 1;
+        } else {
+            self.unpriced_calls += 1;
+        }
+    }
+
+    pub(super) fn finish(
+        mut self,
+        usage_diagnostics: UsageDiagnostics,
+        rate_limit_diagnostics: RateLimitDiagnostics,
+    ) -> LimitUsageReport {
+        if self.group_by == LimitUsageGroupBy::Window {
+            for window in &self.windows {
+                let group_key = window.id.clone();
+                let row_key = limit_usage_row_key(self.selector, Some(window), &group_key);
+                self.rows.entry(row_key).or_insert_with(|| {
+                    mutable_limit_usage_row(self.selector, self.group_by, Some(window), group_key)
+                });
+            }
+
+            if self.rows.is_empty() {
+                let group_key = "unobserved".to_string();
+                let row_key = limit_usage_row_key(self.selector, None, &group_key);
+                self.rows.entry(row_key).or_insert_with(|| {
+                    mutable_limit_usage_row(self.selector, self.group_by, None, group_key)
+                });
+            }
+        }
+
+        let mut rows = self
+            .rows
+            .into_values()
+            .map(limit_usage_row)
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| compare_limit_usage_rows(left, right, self.sort_by));
+        if let Some(limit) = self.limit {
+            rows.truncate(limit);
+        }
+
+        let diagnostics = LimitUsageDiagnostics {
+            observed_windows: self.windows.len() as i64,
+            unobserved_usage_events: self.unobserved_usage_events,
+            usage: usage_diagnostics,
+            rate_limits: rate_limit_diagnostics,
+        };
+
+        LimitUsageReport {
+            start: self.start,
+            end: self.end,
+            limit_window: self.selector.as_str(),
+            window_minutes: self.selector.window_minutes(),
+            group_by: self.group_by,
+            include_reasoning_effort: self.include_reasoning_effort,
+            sort_by: self.sort_by,
+            limit: self.limit,
+            sessions_dir: self.sessions_dir,
+            rows,
+            totals: UsageStatRow {
+                key: "Total".to_string(),
+                sessions: self.total_sessions.len(),
+                calls: self.calls,
+                usage: self.totals,
+                credits: round_credits(self.credits),
+                usd: credits_to_usd(self.credits),
+                priced_calls: self.priced_calls,
+                unpriced_calls: self.unpriced_calls,
+            },
+            unpriced_models: format_unpriced_models(self.unpriced_models),
+            diagnostics: Some(diagnostics),
+        }
+    }
+
+    fn window_for_record(&self, record: &UsageRecordView<'_>) -> Option<&LimitWindow> {
+        self.windows
+            .iter()
+            .filter(|window| {
+                record.timestamp >= window.estimated_start && record.timestamp < window.reset_at
+            })
+            .filter(|window| match record.account_id {
+                Some(account_id) => window
+                    .account_id
+                    .as_deref()
+                    .is_none_or(|window_account| window_account == account_id),
+                None => window.account_id.is_none(),
+            })
+            .max_by(|left, right| {
+                left.estimated_start
+                    .cmp(&right.estimated_start)
+                    .then_with(|| left.reset_at.cmp(&right.reset_at))
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+    }
+}
+
+impl UsageRecordAccumulator for LimitUsageAccumulator {
+    fn add_record(&mut self, record: UsageRecordView<'_>) {
+        self.add(record);
+    }
+
+    fn empty_like(&self) -> Self {
+        Self::new(LimitUsageAccumulatorConfig {
+            start: self.start,
+            end: self.end,
+            selector: self.selector,
+            group_by: self.group_by,
+            sessions_dir: self.sessions_dir.clone(),
+            include_reasoning_effort: self.include_reasoning_effort,
+            sort_by: self.sort_by,
+            limit: self.limit,
+            windows: self.windows.clone(),
+        })
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (key, other_row) in other.rows {
+            if let Some(row) = self.rows.get_mut(&key) {
+                merge_mutable_limit_usage_row(row, other_row);
+            } else {
+                self.rows.insert(key, other_row);
+            }
+        }
+
+        self.total_sessions.extend(other.total_sessions);
+        self.totals.add(&other.totals);
+        self.calls += other.calls;
+        self.credits += other.credits;
+        self.priced_calls += other.priced_calls;
+        self.unpriced_calls += other.unpriced_calls;
+        merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
+        self.unobserved_usage_events += other.unobserved_usage_events;
     }
 }
 
@@ -594,6 +861,144 @@ impl UsageRecordAccumulator for UsageSessionDetailAccumulator {
         self.unpriced_calls += other.unpriced_calls;
         merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
     }
+}
+
+fn mutable_limit_usage_row(
+    selector: LimitWindowSelector,
+    group_by: LimitUsageGroupBy,
+    window: Option<&LimitWindow>,
+    group_key: String,
+) -> MutableLimitUsageRow {
+    match window {
+        Some(window) => MutableLimitUsageRow {
+            window_id: window.id.clone(),
+            window: window.window.clone(),
+            window_minutes: window.window_minutes,
+            window_start: Some(window.estimated_start),
+            reset_at: Some(window.reset_at),
+            observed: true,
+            group_by,
+            group_key,
+            sessions: HashSet::new(),
+            calls: 0,
+            usage: TokenUsage::default(),
+            credits: 0.0,
+            priced_calls: 0,
+            unpriced_calls: 0,
+        },
+        None => MutableLimitUsageRow {
+            window_id: format!("unobserved:{}", selector.as_str()),
+            window: selector.as_str().to_string(),
+            window_minutes: selector.window_minutes(),
+            window_start: None,
+            reset_at: None,
+            observed: false,
+            group_by,
+            group_key,
+            sessions: HashSet::new(),
+            calls: 0,
+            usage: TokenUsage::default(),
+            credits: 0.0,
+            priced_calls: 0,
+            unpriced_calls: 0,
+        },
+    }
+}
+
+fn limit_usage_row(row: MutableLimitUsageRow) -> LimitUsageRow {
+    LimitUsageRow {
+        window_id: row.window_id,
+        window: row.window,
+        window_minutes: row.window_minutes,
+        window_start: row.window_start,
+        reset_at: row.reset_at,
+        observed: row.observed,
+        group_by: row.group_by.as_str(),
+        group_key: row.group_key,
+        sessions: row.sessions.len(),
+        calls: row.calls,
+        usage: row.usage,
+        credits: round_credits(row.credits),
+        usd: credits_to_usd(row.credits),
+        priced_calls: row.priced_calls,
+        unpriced_calls: row.unpriced_calls,
+    }
+}
+
+fn limit_usage_group_key(
+    record: &UsageRecordView<'_>,
+    group_by: LimitUsageGroupBy,
+    include_reasoning_effort: bool,
+    window: Option<&LimitWindow>,
+) -> String {
+    match group_by.as_stat() {
+        Some(stat_group_by) => group_key(record, stat_group_by, include_reasoning_effort),
+        None => window
+            .map(|window| window.id.clone())
+            .unwrap_or_else(|| "unobserved".to_string()),
+    }
+}
+
+fn limit_usage_row_key(
+    selector: LimitWindowSelector,
+    window: Option<&LimitWindow>,
+    group_key: &str,
+) -> String {
+    match window {
+        Some(window) => format!("{}|{group_key}", window.id),
+        None => format!("unobserved:{}|{group_key}", selector.as_str()),
+    }
+}
+
+fn compare_limit_usage_rows(
+    left: &LimitUsageRow,
+    right: &LimitUsageRow,
+    sort_by: Option<StatSort>,
+) -> Ordering {
+    match sort_by {
+        None | Some(StatSort::Time) => compare_limit_usage_rows_by_window(left, right),
+        Some(StatSort::Tokens) => by_limit_usage_tokens_desc(left, right)
+            .then_with(|| compare_limit_usage_rows_by_window(left, right)),
+        Some(StatSort::Credits) => by_credits_desc(left.credits, right.credits)
+            .then_with(|| compare_limit_usage_rows_by_window(left, right)),
+        Some(StatSort::Calls) => right
+            .calls
+            .cmp(&left.calls)
+            .then_with(|| compare_limit_usage_rows_by_window(left, right)),
+        Some(StatSort::Sessions) => right
+            .sessions
+            .cmp(&left.sessions)
+            .then_with(|| compare_limit_usage_rows_by_window(left, right)),
+    }
+}
+
+fn compare_limit_usage_rows_by_window(left: &LimitUsageRow, right: &LimitUsageRow) -> Ordering {
+    match (&left.reset_at, &right.reset_at) {
+        (Some(left_reset), Some(right_reset)) => left_reset
+            .cmp(right_reset)
+            .then_with(|| left.window_start.cmp(&right.window_start))
+            .then_with(|| left.group_key.cmp(&right.group_key))
+            .then_with(|| left.window_id.cmp(&right.window_id)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left
+            .group_key
+            .cmp(&right.group_key)
+            .then_with(|| left.window_id.cmp(&right.window_id)),
+    }
+}
+
+fn by_limit_usage_tokens_desc(left: &LimitUsageRow, right: &LimitUsageRow) -> Ordering {
+    right.usage.total_tokens.cmp(&left.usage.total_tokens)
+}
+
+fn merge_mutable_limit_usage_row(row: &mut MutableLimitUsageRow, other: MutableLimitUsageRow) {
+    row.sessions.extend(other.sessions);
+    row.calls += other.calls;
+    row.usage.add(&other.usage);
+    row.credits += other.credits;
+    row.priced_calls += other.priced_calls;
+    row.unpriced_calls += other.unpriced_calls;
 }
 
 fn group_key(

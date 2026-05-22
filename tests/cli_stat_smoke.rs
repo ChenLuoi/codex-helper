@@ -3,10 +3,13 @@ mod common;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use common::{
     assert_array, assert_contains, assert_failure_contains, assert_json_eq,
-    assert_json_local_day_end, assert_json_local_day_start, assert_success,
-    assert_usage_diagnostics_schema, assert_usage_totals_schema, fixed_now_utc, parse_csv,
-    parse_json, run_codex_ops, Sandbox, FIXED_NOW,
+    assert_json_local_day_end, assert_json_local_day_start, assert_limit_usage_diagnostics_schema,
+    assert_limit_usage_row_schema, assert_no_limit_source_leakage,
+    assert_no_source_paths_by_default, assert_success, assert_usage_diagnostics_schema,
+    assert_usage_totals_schema, fixed_now_utc, parse_csv, parse_json, run_codex_ops, Sandbox,
+    FIXED_NOW,
 };
+use std::fs;
 
 #[test]
 fn stat_json_schema_and_account_attribution_are_stable() {
@@ -328,5 +331,362 @@ fn stat_format_outputs_and_sessions_view_remain_stable() {
         &sessions["totals"]["usage"]["totalTokens"],
         3600,
         "stat sessions total tokens",
+    );
+}
+
+#[test]
+fn stat_limit_window_usage_outputs_real_window_rows() {
+    let sandbox = Sandbox::new();
+
+    let weekly = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&weekly, "stat limit-window 7d json");
+    assert_no_limit_source_leakage(&weekly.stdout, &sandbox, "stat limit-window 7d json");
+    let report = parse_json(&weekly.stdout, "stat limit-window 7d json");
+    common::assert_has_keys(
+        &report,
+        &[
+            "start",
+            "end",
+            "limitWindow",
+            "windowMinutes",
+            "groupBy",
+            "rows",
+            "totals",
+            "warnings",
+            "diagnostics",
+        ],
+        "limit usage report",
+    );
+    assert_json_eq(&report["limitWindow"], "7d", "limit usage window");
+    assert_json_eq(&report["windowMinutes"], 10080, "limit usage minutes");
+    assert_json_eq(&report["groupBy"], "window", "limit usage group");
+    let rows = assert_array(&report["rows"], "limit usage rows");
+    assert_eq!(rows.len(), 3);
+    for (index, row) in rows.iter().enumerate() {
+        assert_limit_usage_row_schema(row, &format!("limit usage row {index}"));
+    }
+    assert_json_eq(&rows[0]["resetAt"], "2026-05-11T09:00:00Z", "first reset");
+    assert_json_eq(&rows[0]["observed"], true, "first observed");
+    assert_json_eq(&rows[0]["calls"], 2, "first calls");
+    assert_json_eq(&rows[0]["usage"]["totalTokens"], 3100, "first total tokens");
+    assert_json_eq(&rows[2]["calls"], 0, "empty observed window calls");
+    assert_json_eq(
+        &report["totals"]["usage"]["totalTokens"],
+        3600,
+        "limit usage total tokens",
+    );
+    assert_limit_usage_diagnostics_schema(&report["diagnostics"], "limit usage diagnostics");
+    assert_json_eq(
+        &report["diagnostics"]["observedWindows"],
+        3,
+        "limit usage observed windows",
+    );
+    assert_json_eq(
+        &report["diagnostics"]["unobservedUsageEvents"],
+        0,
+        "limit usage unobserved count",
+    );
+    assert_no_source_paths_by_default(&report, "stat limit-window 7d json");
+
+    let five_hour = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "5h",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&five_hour, "stat limit-window 5h json");
+    let five_hour_report = parse_json(&five_hour.stdout, "stat limit-window 5h json");
+    assert_json_eq(&five_hour_report["limitWindow"], "5h", "5h window");
+    assert!(assert_array(&five_hour_report["rows"], "5h rows")
+        .iter()
+        .any(|row| row["window"] == "5h" && row["calls"] == 2));
+
+    for group in ["model", "cwd", "account"] {
+        let grouped = run_codex_ops(
+            [
+                "stat",
+                "--all",
+                "--limit-window",
+                "7d",
+                "--group-by",
+                group,
+                "--json",
+                "--sessions-dir",
+                sandbox.sessions_dir.to_str().unwrap(),
+                "--account-history-file",
+                sandbox.account_history_file.to_str().unwrap(),
+            ],
+            &sandbox,
+        );
+        assert_success(&grouped, &format!("stat limit-window group {group}"));
+        let grouped_report = parse_json(&grouped.stdout, &format!("grouped {group}"));
+        assert_json_eq(&grouped_report["groupBy"], group, "grouped groupBy");
+        let grouped_rows = assert_array(&grouped_report["rows"], "grouped rows");
+        assert!(!grouped_rows.is_empty(), "grouped rows should not be empty");
+        assert!(grouped_rows.iter().all(|row| row["groupBy"] == group));
+    }
+
+    let csv = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--format",
+            "csv",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&csv, "stat limit-window csv");
+    let csv_rows = parse_csv(&csv.stdout);
+    assert_eq!(csv_rows[0][0], "Window ID", "limit usage csv first header");
+    assert_eq!(
+        csv_rows.last().unwrap()[0],
+        "Total",
+        "limit usage csv total"
+    );
+
+    let markdown = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--format",
+            "markdown",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&markdown, "stat limit-window markdown");
+    assert_contains(
+        &markdown.stdout,
+        "| Window ID | Window |",
+        "limit usage markdown header",
+    );
+}
+
+#[test]
+fn stat_limit_window_prefers_newer_overlap_and_shapes_rows() {
+    let sandbox = Sandbox::new();
+    let sessions_dir = sandbox.home.join("early-reset-sessions/2026/05/10");
+    fs::create_dir_all(&sessions_dir).expect("create early reset sessions dir");
+    fs::write(
+        sessions_dir.join("rollout-2026-05-10T09-00-00-early-reset.jsonl"),
+        [
+            r#"{"timestamp":"2026-05-10T09:00:00.000Z","type":"session_meta","payload":{"id":"early-reset","model":"gpt-5.5","cwd":"/workspace/early-reset","reasoning_effort":"medium"}}"#,
+            r#"{"timestamp":"2026-05-10T09:00:01.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":40.0,"resets_at":1778421600},"secondary":{"window_minutes":10080,"used_percent":80.0,"resets_at":1779008400},"plan_type":"pro","limit_id":"early-reset-limit"}}}"#,
+            r#"{"timestamp":"2026-05-10T09:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100},"total_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100}}}}"#,
+            r#"{"timestamp":"2026-05-12T12:00:00.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":5.0,"resets_at":1778605200},"secondary":{"window_minutes":10080,"used_percent":4.0,"resets_at":1779192000},"plan_type":"pro","limit_id":"early-reset-limit"}}}"#,
+            r#"{"timestamp":"2026-05-12T12:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":160,"cached_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":200},"total_token_usage":{"input_tokens":240,"cached_input_tokens":0,"output_tokens":60,"reasoning_output_tokens":0,"total_tokens":300}}}}"#,
+        ]
+        .join("\n"),
+    )
+    .expect("write early reset session");
+    let root_sessions_dir = sandbox.home.join("early-reset-sessions");
+
+    let default = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--json",
+            "--sessions-dir",
+            root_sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&default, "stat limit-window early reset json");
+    let report = parse_json(&default.stdout, "stat limit-window early reset json");
+    let rows = assert_array(&report["rows"], "early reset rows");
+    assert_eq!(rows.len(), 2);
+    assert_json_eq(&rows[0]["resetAt"], "2026-05-17T09:00:00Z", "old reset");
+    assert_json_eq(&rows[0]["calls"], 1, "old window calls");
+    assert_json_eq(&rows[0]["usage"]["totalTokens"], 100, "old window tokens");
+    assert_json_eq(&rows[1]["resetAt"], "2026-05-19T12:00:00Z", "new reset");
+    assert_json_eq(&rows[1]["calls"], 1, "new window calls");
+    assert_json_eq(&rows[1]["usage"]["totalTokens"], 200, "new window tokens");
+
+    let shaped = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--sort",
+            "tokens",
+            "--limit",
+            "1",
+            "--json",
+            "--sessions-dir",
+            root_sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&shaped, "stat limit-window sort limit json");
+    let shaped_report = parse_json(&shaped.stdout, "stat limit-window sort limit json");
+    assert_json_eq(&shaped_report["sortBy"], "tokens", "limit usage sort");
+    assert_json_eq(&shaped_report["limit"], 1, "limit usage limit");
+    let shaped_rows = assert_array(&shaped_report["rows"], "shaped rows");
+    assert_eq!(shaped_rows.len(), 1);
+    assert_json_eq(
+        &shaped_rows[0]["resetAt"],
+        "2026-05-19T12:00:00Z",
+        "highest token row reset",
+    );
+    assert_json_eq(
+        &shaped_rows[0]["usage"]["totalTokens"],
+        200,
+        "highest token row usage",
+    );
+}
+
+#[test]
+fn stat_limit_window_uses_pre_start_limit_sample_for_attribution() {
+    let sandbox = Sandbox::new();
+    let sessions_dir = sandbox.home.join("pre-start-limit-sessions/2026/05/12");
+    fs::create_dir_all(&sessions_dir).expect("create pre-start limit sessions dir");
+    fs::write(
+        sessions_dir.join("rollout-2026-05-12T08-59-00-pre-start-limit.jsonl"),
+        [
+            r#"{"timestamp":"2026-05-12T08:58:00.000Z","type":"session_meta","payload":{"id":"pre-start-limit","model":"gpt-5.5","cwd":"/workspace/pre-start-limit","reasoning_effort":"medium"}}"#,
+            r#"{"timestamp":"2026-05-12T08:59:00.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":3.0,"resets_at":1778489940},"secondary":{"window_minutes":10080,"used_percent":11.0,"resets_at":1779181140},"plan_type":"pro","limit_id":"pre-start-limit"}}}"#,
+            r#"{"timestamp":"2026-05-12T09:30:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30,"cached_input_tokens":2,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":42},"total_token_usage":{"input_tokens":30,"cached_input_tokens":2,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":42}}}}"#,
+        ]
+        .join("\n"),
+    )
+    .expect("write pre-start limit session");
+    let root_sessions_dir = sandbox.home.join("pre-start-limit-sessions");
+
+    let result = run_codex_ops(
+        [
+            "stat",
+            "--start",
+            "2026-05-12T09:00:00Z",
+            "--end",
+            "2026-05-12T10:00:00Z",
+            "--limit-window",
+            "7d",
+            "--json",
+            "--sessions-dir",
+            root_sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&result, "stat limit-window pre-start sample json");
+    let report = parse_json(&result.stdout, "stat limit-window pre-start sample json");
+    let rows = assert_array(&report["rows"], "pre-start rows");
+    assert_eq!(rows.len(), 1);
+    assert_limit_usage_row_schema(&rows[0], "pre-start row");
+    assert_json_eq(&rows[0]["observed"], true, "pre-start observed flag");
+    assert_json_eq(
+        &rows[0]["resetAt"],
+        "2026-05-19T08:59:00Z",
+        "pre-start reset",
+    );
+    assert_json_eq(&rows[0]["calls"], 1, "pre-start calls");
+    assert_json_eq(
+        &rows[0]["usage"]["totalTokens"],
+        42,
+        "pre-start total tokens",
+    );
+    assert_json_eq(
+        &report["diagnostics"]["observedWindows"],
+        1,
+        "pre-start observed windows",
+    );
+    assert_json_eq(
+        &report["diagnostics"]["unobservedUsageEvents"],
+        0,
+        "pre-start unobserved usage events",
+    );
+}
+
+#[test]
+fn stat_limit_window_without_samples_reports_unobserved_usage() {
+    let sandbox = Sandbox::new();
+    let sessions_dir = sandbox.home.join("token-only-sessions/2026/05/13");
+    fs::create_dir_all(&sessions_dir).expect("create token-only sessions dir");
+    fs::write(
+        sessions_dir.join("rollout-2026-05-13T09-00-00-token-only.jsonl"),
+        [
+            r#"{"timestamp":"2026-05-13T09:00:00.000Z","type":"session_meta","payload":{"id":"token-only","model":"gpt-5.5","cwd":"/workspace/token-only","reasoning_effort":"high"}}"#,
+            r#"{"timestamp":"2026-05-13T09:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":1,"output_tokens":2,"reasoning_output_tokens":0,"total_tokens":12},"total_token_usage":{"input_tokens":10,"cached_input_tokens":1,"output_tokens":2,"reasoning_output_tokens":0,"total_tokens":12}}}}"#,
+        ]
+        .join("\n"),
+    )
+    .expect("write token-only session");
+    let root_sessions_dir = sandbox.home.join("token-only-sessions");
+
+    let result = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--json",
+            "--sessions-dir",
+            root_sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&result, "stat limit-window unobserved json");
+    let report = parse_json(&result.stdout, "stat limit-window unobserved json");
+    let rows = assert_array(&report["rows"], "unobserved rows");
+    assert_eq!(rows.len(), 1);
+    assert_limit_usage_row_schema(&rows[0], "unobserved row");
+    assert_json_eq(&rows[0]["windowId"], "unobserved:7d", "unobserved id");
+    assert_json_eq(&rows[0]["observed"], false, "unobserved flag");
+    assert_json_eq(&rows[0]["groupKey"], "unobserved", "unobserved group");
+    assert_json_eq(&rows[0]["calls"], 1, "unobserved calls");
+    assert_json_eq(
+        &rows[0]["usage"]["totalTokens"],
+        12,
+        "unobserved total tokens",
+    );
+    assert_json_eq(
+        &report["diagnostics"]["observedWindows"],
+        0,
+        "unobserved windows",
+    );
+    assert_json_eq(
+        &report["diagnostics"]["unobservedUsageEvents"],
+        1,
+        "unobserved usage events",
     );
 }

@@ -1,7 +1,7 @@
 {
   "name": "codex-ops",
   "version": "0.1.8",
-  "description": "A local operations CLI for Codex auth, usage, and cycle workflows.",
+  "description": "A local operations CLI for Codex auth, usage, and limit workflows.",
   "homepage": "https://github.com/ChenLuoi/codex-ops#readme",
   "bugs": {
     "url": "https://github.com/ChenLuoi/codex-ops/issues"
