@@ -1,0 +1,5 @@
+{"timestamp":"2026-05-12T11:00:00.000Z","type":"session_meta","payload":{"id":"rust-run-session-gamma","model":"gpt-5.4","cwd":"/workspace/rust-run-gamma","reasoning_effort":"medium"}}
+{"timestamp":"2026-05-12T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.4","cwd":"/workspace/rust-run-gamma","model_config":{"reasoning_effort":"medium"}}}
+{"timestamp":"2026-05-12T11:10:00.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":63.0,"resets_at":1778601600},"secondary":{"window_minutes":10080,"used_percent":91.0,"resets_at":1779094800},"plan_type":"pro","limit_id":"fixture-main-codex"}}}
+{"timestamp":"2026-05-12T12:00:00.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":8.0,"resets_at":1778605200},"secondary":{"window_minutes":10080,"used_percent":4.0,"resets_at":1779181200},"plan_type":"pro","limit_id":"fixture-main-codex"}}}
+{"timestamp":"2026-05-12T12:10:00.000Z","type":"event_msg","payload":{"rate_limits":null}}

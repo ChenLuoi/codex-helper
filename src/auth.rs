@@ -1,4 +1,6 @@
-use crate::account_history::{self, AccountHistoryAccount, AccountHistoryStore};
+use crate::account_history::{
+    self, AccountHistoryAccount, AccountHistoryStore, UsageAccountHistory,
+};
 use crate::error::AppError;
 use crate::format::to_pretty_json;
 use crate::storage::{percent_encode, resolve_storage_paths, write_sensitive_file, StorageOptions};
@@ -185,6 +187,35 @@ pub fn read_codex_auth_status(
     let auth_file = auth_file_path(options);
     let parsed = read_codex_auth_file(&auth_file, now)?;
     Ok(parsed.report)
+}
+
+pub fn ensure_usage_account_history(
+    account_history_file: &Path,
+    options: &AuthCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<UsageAccountHistory, AppError> {
+    let mut store = account_history::read_account_history_store(account_history_file)?;
+    if store.default_account.is_none() {
+        let report = read_codex_auth_status(options, now)?;
+        let account_id = report
+            .summary
+            .chatgpt_account_id
+            .clone()
+            .or(report.summary.token_account_id.clone())
+            .ok_or_else(|| AppError::new("No account id found in auth.json."))?;
+        store = account_history::ensure_default_account_in_file(
+            account_history_file,
+            AccountHistoryAccount::auth_json(
+                account_id,
+                now,
+                report.summary.name.clone(),
+                report.summary.email.clone(),
+                report.summary.plan_type.clone(),
+            ),
+        )?;
+    }
+    account_history::usage_account_history_from_store(store)?
+        .ok_or_else(|| AppError::new("No account history default account found."))
 }
 
 pub fn save_current_codex_auth_profile(
@@ -709,7 +740,6 @@ fn storage_options(options: &AuthCommandOptions) -> StorageOptions {
         auth_file: options.auth_file.clone(),
         profile_store_dir: options.store_dir.clone(),
         account_history_file: options.account_history_file.clone(),
-        cycle_file: None,
         sessions_dir: None,
     }
 }

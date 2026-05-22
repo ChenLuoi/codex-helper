@@ -11,7 +11,6 @@ pub struct StoragePaths {
     pub auth_file: PathBuf,
     pub profile_store_dir: PathBuf,
     pub account_history_file: PathBuf,
-    pub cycle_file: PathBuf,
     pub sessions_dir: PathBuf,
 }
 
@@ -21,7 +20,6 @@ pub struct StorageOptions {
     pub auth_file: Option<PathBuf>,
     pub profile_store_dir: Option<PathBuf>,
     pub account_history_file: Option<PathBuf>,
-    pub cycle_file: Option<PathBuf>,
     pub sessions_dir: Option<PathBuf>,
 }
 
@@ -64,10 +62,6 @@ pub fn resolve_storage_paths(options: &StorageOptions) -> StoragePaths {
             .account_history_file
             .clone()
             .unwrap_or_else(|| helper_dir.join("auth-account-history.json")),
-        cycle_file: options
-            .cycle_file
-            .clone()
-            .unwrap_or_else(|| helper_dir.join("stat-cycles.json")),
         sessions_dir: options
             .sessions_dir
             .clone()
@@ -184,10 +178,6 @@ mod tests {
             PathBuf::from("/tmp/codex-home/codex-ops/auth-account-history.json")
         );
         assert_eq!(
-            paths.cycle_file,
-            PathBuf::from("/tmp/codex-home/codex-ops/stat-cycles.json")
-        );
-        assert_eq!(
             paths.sessions_dir,
             PathBuf::from("/tmp/codex-home/sessions")
         );
@@ -200,7 +190,6 @@ mod tests {
             auth_file: Some(PathBuf::from("/tmp/auth.json")),
             profile_store_dir: Some(PathBuf::from("/tmp/profiles")),
             account_history_file: Some(PathBuf::from("/tmp/history.json")),
-            cycle_file: Some(PathBuf::from("/tmp/cycles.json")),
             sessions_dir: Some(PathBuf::from("/tmp/sessions")),
         });
 
@@ -210,7 +199,6 @@ mod tests {
             paths.account_history_file,
             PathBuf::from("/tmp/history.json")
         );
-        assert_eq!(paths.cycle_file, PathBuf::from("/tmp/cycles.json"));
         assert_eq!(paths.sessions_dir, PathBuf::from("/tmp/sessions"));
     }
 

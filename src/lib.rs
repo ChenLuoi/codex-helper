@@ -1,12 +1,13 @@
 pub mod account_history;
 pub mod auth;
 pub mod cli;
-pub mod cycles;
 pub mod doctor;
 pub mod error;
 pub mod format;
+pub mod limits;
 pub mod pricing;
 pub mod prompt;
+pub(crate) mod session_scan;
 pub mod stats;
 pub mod storage;
 pub mod time;
@@ -19,14 +20,12 @@ use crate::auth::{
 };
 use crate::cli::{
     AuthCliCommand, AuthCliPaths, AuthProfileCliOptions, AuthRemoveCliOptions,
-    AuthSelectCliOptions, AuthStatusCliOptions, CliCommand, CycleCliCommand, DoctorCliCommand,
-    DoctorCliPaths, ParsedCli, StatCliCommand,
-};
-use crate::cycles::{
-    run_cycle_add, run_cycle_current, run_cycle_history, run_cycle_list, run_cycle_remove,
+    AuthSelectCliOptions, AuthStatusCliOptions, CliCommand, DoctorCliCommand, DoctorCliPaths,
+    LimitCliCommand, ParsedCli, StatCliCommand,
 };
 use crate::doctor::{format_doctor_report, read_doctor_report, DoctorOptions};
 use crate::error::AppError;
+use crate::limits::run_limit_command;
 use crate::prompt::{DialoguerPrompt, Prompt};
 use crate::stats::run_stat_command;
 use chrono::{DateTime, Utc};
@@ -81,7 +80,7 @@ where
             CliCommand::Auth(command) => run_auth(command),
             CliCommand::Doctor(command) => run_doctor(command),
             CliCommand::Stat(command) => run_stat(command),
-            CliCommand::Cycle(command) => run_cycle(command),
+            CliCommand::Limit(command) => run_limit(command),
         },
         Err(error) => CliResult::parse_error(error.code, error.message),
     }
@@ -357,24 +356,8 @@ fn run_stat(command: StatCliCommand) -> CliResult {
     cli_result_from_string(result)
 }
 
-fn run_cycle(command: CycleCliCommand) -> CliResult {
-    let result = (|| {
-        let now = cli_now()?;
-        match command {
-            CycleCliCommand::Add {
-                time_parts,
-                options,
-            } => run_cycle_add(&time_parts, options, now),
-            CycleCliCommand::List { options } => run_cycle_list(options, now),
-            CycleCliCommand::Remove { anchor_id, options } => {
-                run_cycle_remove(&anchor_id, options, now)
-            }
-            CycleCliCommand::Current { options } => run_cycle_current(options, now),
-            CycleCliCommand::History { cycle_id, options } => {
-                run_cycle_history(cycle_id, options, now)
-            }
-        }
-    })();
+fn run_limit(command: LimitCliCommand) -> CliResult {
+    let result = (|| run_limit_command(command.command, command.options, cli_now()?))();
     cli_result_from_string(result)
 }
 
@@ -392,7 +375,6 @@ fn doctor_command_options(paths: &DoctorCliPaths) -> DoctorOptions {
         auth_file: paths.auth_file.clone(),
         codex_home: paths.codex_home.clone(),
         sessions_dir: paths.sessions_dir.clone(),
-        cycle_file: paths.cycle_file.clone(),
     }
 }
 
@@ -435,7 +417,8 @@ mod tests {
         assert!(result.stdout.contains("auth"));
         assert!(result.stdout.contains("doctor"));
         assert!(result.stdout.contains("stat"));
-        assert!(result.stdout.contains("cycle"));
+        assert!(result.stdout.contains("limit"));
+        assert!(!result.stdout.contains("cycle"));
     }
 
     #[test]
@@ -460,22 +443,20 @@ mod tests {
     }
 
     #[test]
-    fn cycle_leaf_validates_arguments() {
-        let result = run_cli(["cycle", "add"]);
-
-        assert_eq!(result.code, 1);
-        assert!(result.stdout.is_empty());
-        assert!(result
-            .stderr
-            .contains("cycle add requires at least one weekly cycle start time"));
-    }
-
-    #[test]
     fn unknown_command_returns_error() {
         let result = run_cli(["missing"]);
 
         assert_eq!(result.code, 2);
         assert!(result.stderr.contains("unrecognized subcommand 'missing'"));
+    }
+
+    #[test]
+    fn removed_cycle_command_returns_unknown_command() {
+        let result = run_cli(["cycle", "current"]);
+
+        assert_eq!(result.code, 2);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.contains("unrecognized subcommand 'cycle'"));
     }
 
     #[test]

@@ -33,10 +33,13 @@ const npmProjectMetadata = {
     url: "git+https://github.com/ChenLuoi/codex-ops.git"
   }
 };
+const expectedDescription = "A local operations CLI for Codex auth, usage, and limit workflows.";
 
 assertEqual(packageJson.name, "codex-ops", "package name");
 assertEqual(cargoName, "codex-ops", "Cargo package name");
 assertEqual(packageJson.version, cargoVersion, "package/Cargo version");
+assertEqual(packageJson.description, expectedDescription, "package description");
+assertEqual(matchTomlString(cargoToml, "description"), expectedDescription, "Cargo description");
 assertNpmProjectMetadata(packageJson, "package");
 assertEqual(packageJson.bin?.["codex-ops"], "bin/codex-ops.js", "npm bin");
 assertEqual(

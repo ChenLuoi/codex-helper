@@ -1,6 +1,7 @@
 use crate::auth::{read_codex_auth_status, AuthCommandOptions};
 use crate::error::AppError;
 use crate::format::to_pretty_json;
+use crate::limits::{read_rate_limit_samples_report, RateLimitSamplesReadOptions};
 use crate::pricing::{
     calculate_credit_cost, list_known_unpriced_models, list_model_pricing, normalize_model_name,
     TokenUsage as PricingTokenUsage, CODEX_RATE_CARD_SOURCE,
@@ -9,7 +10,6 @@ use crate::stats::{read_usage_records_report, UsageRecordsReadOptions};
 use crate::storage::{resolve_storage_paths, StorageOptions};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -28,7 +28,6 @@ pub struct DoctorOptions {
     pub auth_file: Option<PathBuf>,
     pub codex_home: Option<PathBuf>,
     pub sessions_dir: Option<PathBuf>,
-    pub cycle_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -46,7 +45,6 @@ pub struct DoctorReport {
     pub auth_file: String,
     pub sessions_dir: String,
     pub helper_dir: String,
-    pub cycle_file: String,
     pub checks: Vec<DoctorCheck>,
 }
 
@@ -56,6 +54,15 @@ struct RecentUsageSummary {
     token_count_events: usize,
     included_usage_events: usize,
     unpriced_models: BTreeMap<String, RecentUnpricedModel>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecentRateLimitsSummary {
+    read_files: usize,
+    sample_count: usize,
+    five_hour_samples: usize,
+    seven_day_samples: usize,
+    latest_observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -81,7 +88,6 @@ struct DoctorJson<'a> {
     auth_file: &'a str,
     sessions_dir: &'a str,
     helper_dir: &'a str,
-    cycle_file: &'a str,
     checks: &'a [DoctorCheck],
     summary: DoctorSummary,
 }
@@ -96,7 +102,6 @@ pub fn read_doctor_report(options: &DoctorOptions, now: DateTime<Utc>) -> Doctor
     let storage = resolve_storage_paths(&StorageOptions {
         codex_home: options.codex_home.clone(),
         auth_file: options.auth_file.clone(),
-        cycle_file: options.cycle_file.clone(),
         sessions_dir: options.sessions_dir.clone(),
         profile_store_dir: None,
         account_history_file: None,
@@ -108,8 +113,8 @@ pub fn read_doctor_report(options: &DoctorOptions, now: DateTime<Utc>) -> Doctor
         check_auth_file(&storage.auth_file, options, now),
         check_directory("Sessions directory", &storage.sessions_dir, false),
         check_helper_directory(&storage.helper_dir),
-        check_cycle_store(&storage.cycle_file),
         check_recent_usage(&storage.sessions_dir, now),
+        check_recent_rate_limits(&storage.sessions_dir, now),
         check_pricing(),
     ];
 
@@ -119,7 +124,6 @@ pub fn read_doctor_report(options: &DoctorOptions, now: DateTime<Utc>) -> Doctor
         auth_file: path_to_string(&storage.auth_file),
         sessions_dir: path_to_string(&storage.sessions_dir),
         helper_dir: path_to_string(&storage.helper_dir),
-        cycle_file: path_to_string(&storage.cycle_file),
         checks,
     }
 }
@@ -132,7 +136,6 @@ pub fn format_doctor_report(report: &DoctorReport, json: bool) -> Result<String,
             auth_file: &report.auth_file,
             sessions_dir: &report.sessions_dir,
             helper_dir: &report.helper_dir,
-            cycle_file: &report.cycle_file,
             checks: &report.checks,
             summary: DoctorSummary {
                 errors: report
@@ -160,7 +163,6 @@ pub fn format_doctor_report(report: &DoctorReport, json: bool) -> Result<String,
         format!("Auth file: {}", report.auth_file),
         format!("Sessions dir: {}", report.sessions_dir),
         format!("Helper dir: {}", report.helper_dir),
-        format!("Cycle file: {}", report.cycle_file),
         String::new(),
     ];
 
@@ -365,32 +367,6 @@ fn check_helper_directory(helper_dir: &Path) -> DoctorCheck {
     }
 }
 
-fn check_cycle_store(cycle_file: &Path) -> DoctorCheck {
-    let content = match fs::read_to_string(cycle_file) {
-        Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return ok(
-                "Cycle store",
-                format!("{} does not exist yet", path_to_string(cycle_file)),
-                Vec::new(),
-            )
-        }
-        Err(error) => return check_error("Cycle store", error.to_string(), Vec::new()),
-    };
-
-    match parse_cycle_store_counts(&content, cycle_file) {
-        Ok((account_count, anchor_count)) => ok(
-            "Cycle store",
-            format!("Read {}", path_to_string(cycle_file)),
-            vec![
-                format!("Accounts: {account_count}"),
-                format!("Weekly anchors: {anchor_count}"),
-            ],
-        ),
-        Err(error_message) => check_error("Cycle store", error_message, Vec::new()),
-    }
-}
-
 fn check_recent_usage(sessions_dir: &Path, now: DateTime<Utc>) -> DoctorCheck {
     if !sessions_dir.exists() {
         return warn(
@@ -454,6 +430,55 @@ fn check_recent_usage(sessions_dir: &Path, now: DateTime<Utc>) -> DoctorCheck {
             )
         }
         Err(error) => check_error("Recent usage", error, Vec::new()),
+    }
+}
+
+fn check_recent_rate_limits(sessions_dir: &Path, now: DateTime<Utc>) -> DoctorCheck {
+    if !sessions_dir.exists() {
+        return warn(
+            "Recent rate limits",
+            format!(
+                "Cannot scan rate limits because {} does not exist",
+                path_to_string(sessions_dir)
+            ),
+            Vec::new(),
+        );
+    }
+
+    match read_recent_rate_limits_summary(sessions_dir, now) {
+        Ok(summary) => {
+            let details = vec![
+                format!("Files read: {}", summary.read_files),
+                format!("Samples: {}", summary.sample_count),
+                format!("5h samples: {}", summary.five_hour_samples),
+                format!("7d samples: {}", summary.seven_day_samples),
+                format!(
+                    "Latest observed at: {}",
+                    summary
+                        .latest_observed_at
+                        .map(format_iso)
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+            ];
+
+            if summary.sample_count == 0 {
+                return warn(
+                    "Recent rate limits",
+                    "No observed rate limits found in the last 7 days",
+                    details,
+                );
+            }
+
+            ok(
+                "Recent rate limits",
+                format!(
+                    "{} rate-limit sample(s) found in the last 7 days",
+                    summary.sample_count
+                ),
+                details,
+            )
+        }
+        Err(error) => check_error("Recent rate limits", error, Vec::new()),
     }
 }
 
@@ -535,46 +560,38 @@ fn read_recent_usage_summary(
     Ok(summary)
 }
 
-fn parse_cycle_store_counts(content: &str, cycle_file: &Path) -> Result<(usize, usize), String> {
-    let value: Value = serde_json::from_str(content)
-        .map_err(|error| format!("Failed to parse {}: {}", path_to_string(cycle_file), error))?;
-    let object = value.as_object().ok_or_else(|| {
-        format!(
-            "Expected {} to contain a weekly cycle store object.",
-            path_to_string(cycle_file)
-        )
-    })?;
-    if object.get("version").and_then(Value::as_i64) != Some(1) {
-        return Err(format!(
-            "Unsupported weekly cycle store version in {}: {}.",
-            path_to_string(cycle_file),
-            object
-                .get("version")
-                .map(Value::to_string)
-                .unwrap_or_else(|| "undefined".to_string())
-        ));
-    }
-    let accounts = object
-        .get("accounts")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            format!(
-                "Expected {} accounts to be an object.",
-                path_to_string(cycle_file)
-            )
-        })?;
+fn read_recent_rate_limits_summary(
+    sessions_dir: &Path,
+    now: DateTime<Utc>,
+) -> Result<RecentRateLimitsSummary, String> {
+    let start = now - Duration::days(7);
+    let report = read_rate_limit_samples_report(&RateLimitSamplesReadOptions {
+        start,
+        end: now,
+        sessions_dir: sessions_dir.to_path_buf(),
+        scan_all_files: false,
+        account_history_file: None,
+        account_id: None,
+        plan_type: None,
+        window_minutes: None,
+    })
+    .map_err(|error| error.message().to_string())?;
 
-    let mut anchors = 0usize;
-    for account in accounts.values() {
-        anchors += account
-            .get("weekly")
-            .and_then(|weekly| weekly.get("anchors"))
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or_default();
-    }
-
-    Ok((accounts.len(), anchors))
+    Ok(RecentRateLimitsSummary {
+        read_files: report.diagnostics.read_files.max(0) as usize,
+        sample_count: report.samples.len(),
+        five_hour_samples: report
+            .samples
+            .iter()
+            .filter(|sample| sample.window_minutes == 300)
+            .count(),
+        seven_day_samples: report
+            .samples
+            .iter()
+            .filter(|sample| sample.window_minutes == 10_080)
+            .count(),
+        latest_observed_at: report.samples.iter().map(|sample| sample.timestamp).max(),
+    })
 }
 
 fn ok(name: &str, message: impl Into<String>, details: Vec<String>) -> DoctorCheck {
@@ -675,16 +692,5 @@ mod tests {
         assert!(parse_node_version("v21.0.0").is_some_and(|version| version >= MIN_NODE_VERSION));
         assert!(parse_node_version("v20.11.9").is_some_and(|version| version < MIN_NODE_VERSION));
         assert!(parse_node_version("v19.99.99").is_some_and(|version| version < MIN_NODE_VERSION));
-    }
-
-    #[test]
-    fn parses_cycle_store_counts() {
-        let result = parse_cycle_store_counts(
-            r#"{"version":1,"accounts":{"account-a":{"weekly":{"periodHours":168,"anchors":[{"id":"a"}]}}}}"#,
-            Path::new("/tmp/stat-cycles.json"),
-        )
-        .unwrap();
-
-        assert_eq!(result, (1, 1));
     }
 }

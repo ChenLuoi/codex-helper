@@ -47,14 +47,10 @@ fn thin_end_to_end_smoke() {
     let stat = parse_json(&stat_json.stdout, "stat json");
     assert_json_eq(&stat["totals"]["calls"], 3, "stat total calls");
 
-    let cycle_current = run_codex_ops(
+    let limit_current = run_codex_ops(
         [
-            "cycle",
+            "limit",
             "current",
-            "--cycle-file",
-            sandbox.cycle_file.to_str().unwrap(),
-            "--account-id",
-            "account-fixture",
             "--sessions-dir",
             sandbox.sessions_dir.to_str().unwrap(),
             "--format",
@@ -62,7 +58,7 @@ fn thin_end_to_end_smoke() {
         ],
         &sandbox,
     );
-    assert_success(&cycle_current, "cycle current json");
-    let current = parse_json(&cycle_current.stdout, "cycle current json");
-    assert_json_eq(&current["status"], "active", "cycle current status");
+    assert_success(&limit_current, "limit current json");
+    let current = parse_json(&limit_current.stdout, "limit current json");
+    assert_json_eq(&current["status"], "ok", "limit current status");
 }

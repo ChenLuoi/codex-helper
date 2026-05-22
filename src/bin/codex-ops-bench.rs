@@ -31,8 +31,6 @@ const BENCHMARK_CASES: &[BenchCase] = &[
             "{codexHome}",
             "--sessions-dir",
             "{sessionsDir}",
-            "--cycle-file",
-            "{cycleFile}",
             "--json",
         ],
     },
@@ -98,6 +96,22 @@ const BENCHMARK_CASES: &[BenchCase] = &[
         ],
     },
     BenchCase {
+        id: "stat-limit-window-json",
+        groups: &["stat"],
+        args: &[
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--format",
+            "json",
+            "--account-history-file",
+            "{accountHistoryFile}",
+            "--sessions-dir",
+            "{sessionsDir}",
+        ],
+    },
+    BenchCase {
         id: "stat-sessions-json",
         groups: &["stat"],
         args: &[
@@ -113,36 +127,17 @@ const BENCHMARK_CASES: &[BenchCase] = &[
         ],
     },
     BenchCase {
-        id: "cycle-current-json",
-        groups: &["cycle"],
+        id: "limit-current-json",
+        groups: &["limit"],
         args: &[
-            "cycle",
+            "limit",
             "current",
-            "--cycle-file",
-            "{cycleFile}",
-            "--account-id",
-            "account-fixture",
-            "--sessions-dir",
-            "{sessionsDir}",
             "--format",
             "json",
-        ],
-    },
-    BenchCase {
-        id: "cycle-history-json",
-        groups: &["cycle"],
-        args: &[
-            "cycle",
-            "history",
-            "--cycle-file",
-            "{cycleFile}",
-            "--account-id",
-            "account-fixture",
+            "--account-history-file",
+            "{accountHistoryFile}",
             "--sessions-dir",
             "{sessionsDir}",
-            "--all",
-            "--format",
-            "json",
         ],
     },
 ];
@@ -162,7 +157,6 @@ struct Sandbox {
     auth_file: PathBuf,
     sessions_dir: PathBuf,
     account_history_file: PathBuf,
-    cycle_file: PathBuf,
 }
 
 impl Drop for Sandbox {
@@ -330,7 +324,7 @@ summary. This is a smoke benchmark, not a historical JS comparison harness.
 Options:
   --fixture <path>       Fixture root, default test/fixtures/rust-run
   --runs <n>             Warm runs per command, default 1
-  --matrix <groups>      all, auth, doctor, stat, cycle, poc; comma-separated
+  --matrix <groups>      all, auth, doctor, stat, limit, poc; comma-separated
   --rust-binary <path>   Production Rust binary, default target/release/codex-ops
   -h, --help             Print help"
     );
@@ -379,7 +373,6 @@ fn prepare_sandbox(fixture: &Path) -> Result<Sandbox, String> {
         auth_file: codex_home.join("auth.json"),
         sessions_dir: codex_home.join("sessions"),
         account_history_file: helper_dir.join("auth-account-history.json"),
-        cycle_file: helper_dir.join("stat-cycles.json"),
         codex_home,
     })
 }
@@ -409,7 +402,6 @@ fn resolve_case_args(case: &BenchCase, sandbox: &Sandbox) -> Vec<OsString> {
             "{codexHome}" => sandbox.codex_home.as_os_str().to_owned(),
             "{sessionsDir}" => sandbox.sessions_dir.as_os_str().to_owned(),
             "{accountHistoryFile}" => sandbox.account_history_file.as_os_str().to_owned(),
-            "{cycleFile}" => sandbox.cycle_file.as_os_str().to_owned(),
             value => OsString::from(value),
         })
         .collect()

@@ -1,7 +1,7 @@
 # codex-ops
 
 `codex-ops` is a Rust CLI for local Codex auth profiles, session usage, and
-weekly cycle workflows.
+server rate-limit workflows.
 
 The public command and Rust crate name are both `codex-ops`. The npm package is
 only a thin distribution shim: it detects the current platform, finds the
@@ -77,22 +77,20 @@ codex-ops stat --month --format markdown
 codex-ops stat --last 30d --format json
 codex-ops stat --last 2w --format csv
 codex-ops stat --group-by model --sort credits --limit 5
+codex-ops stat --limit-window 7d
+codex-ops stat --limit-window 5h --group-by model
+codex-ops stat --limit-window 7d --group-by account --format json
 codex-ops stat --verbose
 codex-ops stat sessions --top 10
 codex-ops stat sessions --sort time --limit 10
 codex-ops stat sessions session-a --last 30d
 codex-ops stat sessions session-a --format json --limit 20
 codex-ops stat sessions --last 30d --format json
-codex-ops cycle add "2026-05-01 08:00" --note "initial weekly cycle"
-codex-ops cycle add "2026-05-01 08:00" "2026-05-09 10:30"
-codex-ops cycle list
-codex-ops cycle remove <anchor-id>
-codex-ops cycle current
-codex-ops cycle history
-codex-ops cycle history <cycle-id>
-codex-ops cycle history --select
-codex-ops cycle history --start 2026-05-01 --end 2026-05-31 --format json
-codex-ops cycle history --estimate-before-anchor
+codex-ops limit current
+codex-ops limit windows --window 7d
+codex-ops limit trend --window 5h
+codex-ops limit resets --window 7d --early-only
+codex-ops limit samples --window 5h --format json
 ```
 
 ### Auth
@@ -146,6 +144,34 @@ Options:
 | `-A, --account-id <id>` | Select or remove a specific persisted profile. |
 | `-y, --yes` | Skip confirmation when removing with `--account-id`. |
 
+### Doctor
+
+Syntax:
+
+```bash
+codex-ops doctor
+codex-ops doctor --json
+```
+
+`doctor` checks local Codex Ops configuration and data. It reports Node.js
+version, auth file decode status, sessions directory readability, helper
+directory state, recent token usage, recent rate-limit samples, and embedded
+pricing metadata. It does not read or validate any old anchor store.
+
+`Recent rate limits` scans the last 7 days of local session JSONL for
+`payload.rate_limits` samples. If the sessions directory is readable but no
+samples are observed, the check is a warning with a clear no observed rate
+limits message.
+
+Options:
+
+| Option | Behavior |
+| --- | --- |
+| `--auth-file <path>` | Use a specific `auth.json` file. |
+| `--codex-home <path>` | Resolve default auth and session paths under this Codex home. |
+| `--sessions-dir <path>` | Use a specific sessions directory. |
+| `-j, --json` | Print JSON output. |
+
 ### Stat
 
 Syntax:
@@ -177,94 +203,6 @@ Views:
 | `codex-ops stat sessions` | Top sessions by credits by default. |
 | `codex-ops stat sessions <session-id>` | Event-level token usage timeline for one session. |
 
-### Weekly Limit Cycles
-
-Syntax:
-
-```bash
-codex-ops cycle add/list/remove
-codex-ops cycle current
-codex-ops cycle history
-codex-ops cycle history <cycle-id>
-codex-ops cycle history --select
-```
-
-`cycle` estimates Codex weekly-limit usage from local `token_count` events
-and user-provided anchors. It does not call Codex or OpenAI services and it does
-not implement 5-hour limit windows.
-
-A weekly anchor is the first real use that starts a weekly limit cycle. The
-cycle resets 168 hours later. If no local usage occurs after that reset, no new
-cycle is opened yet; the next local usage event after reset becomes the next
-cycle start.
-
-Anchors are stored by account in
-`$CODEX_HOME/codex-ops/stat-cycles.json`. The account is resolved from
-`--account-id`, then the current `auth.json` account, then the fallback
-`default` account bucket. Cycle usage reads `auth-account-history.json` when
-available so usage from other accounts is not mixed into the selected account.
-If account history is missing and the selected account matches the current
-`auth.json`, cycle reports initialize the history default before filtering. Use
-`--cycle-file <path>` for an isolated store.
-
-Examples:
-
-```bash
-codex-ops cycle add "2026-05-01 08:00" --note "known reset use"
-codex-ops cycle add "2026-05-01 08:00" "2026-05-09 10:30"
-codex-ops cycle list
-codex-ops cycle current
-codex-ops cycle history --last 30d
-codex-ops cycle history cyc_20260509T080000000Z --last 30d
-codex-ops cycle history --select --last 30d
-codex-ops cycle history --estimate-before-anchor --format json
-```
-
-`cycle add` accepts one or more times. Quote values that contain spaces, or
-pass common `YYYY-MM-DD HH:mm` values as unquoted date/time pairs. Time input
-with an explicit offset, such as `2026-05-01T08:00:00+08:00`, is parsed using
-that offset. Time input without an offset, such as `2026-05-01 08:00`, is
-interpreted in the current system time zone. Stored anchors keep the original
-input and save the instant as UTC ISO. Use `-n, --note <text>` to attach a note
-to added anchors.
-
-History reports include a stable cycle ID in each row. Manual cycles use the
-anchor ID, derived cycles use `cyc_<UTC-start>`, and estimated cycles use
-`est_<UTC-start>`. Pass one of those IDs to `cycle history <cycle-id>` to show
-current-style details for that cycle, including by-day and by-model breakdowns.
-Use `cycle history --select` in an interactive terminal to choose from matching
-history rows.
-
-Cycle reports mark each row with a source:
-
-| Source | Meaning |
-| --- | --- |
-| `manual` | Cycle start came from a user anchor. |
-| `derived` | Cycle start came from the first local usage event after reset. |
-| `estimated` | Pre-anchor history was included only because `--estimate-before-anchor` was supplied. |
-| `unanchored` | No usable anchor exists for the selected account. |
-
-By default, history before the earliest anchor is not reported as exact. Use
-`--estimate-before-anchor` only when you want fixed 168-hour pre-anchor buckets
-clearly labeled as `estimated`. `current` table output shows the current cycle
-summary, a by-day breakdown, and a by-model breakdown; JSON output includes the
-same data as `current`, `byDay`, and `byModel`. `current` and `history` read
-session JSONL files from the normal stat sessions directory and enable full
-JSONL file scanning so long sessions are filtered by event time instead of
-rollout filename time.
-
-Cycle options:
-
-| Option | Behavior |
-| --- | --- |
-| `-A, --account-id <id>` | Use a specific cycle account bucket. |
-| `--cycle-file <path>` | Use a specific anchor store file. |
-| `--auth-file <path>` | Use a specific `auth.json` when resolving the account. |
-| `--codex-home <path>` | Resolve `auth.json`, sessions, and the default cycle file under this Codex home. |
-| `--sessions-dir <path>` | Use a specific sessions directory for `current` and `history`. |
-| `-i, --select` | Interactively select a history cycle to show in detail. |
-| `--estimate-before-anchor` | Include pre-anchor estimated history rows. |
-
 Time range options:
 
 | Option | Behavior |
@@ -287,7 +225,8 @@ Aggregation and shaping options:
 
 | Option | Behavior |
 | --- | --- |
-| `-g, --group-by <group>` | Aggregate by `hour`, `day`, `week`, `month`, `model`, or `cwd`. Ignored by `sessions` views. |
+| `-g, --group-by <group>` | Aggregate by `hour`, `day`, `week`, `month`, `model`, `cwd`, or `account`. Ignored by `sessions` views. |
+| `--limit-window <window>` | Aggregate usage by observed server rate-limit windows: `5h` or `7d`. |
 | `-S, --sort <sort>` | Sort rows by `time`, `tokens`, `credits`, `calls`, or `sessions`. |
 | `-n, --limit <n>` | Cap output rows. For `sessions <session-id>`, this caps displayed events while totals still cover the whole matched session. |
 | `-T, --top <n>` | Session-list row count. When both `--top` and `--limit` are supplied to `stat sessions`, `--top` wins. |
@@ -299,6 +238,14 @@ Aggregation and shaping options:
 When `--reasoning-effort` is combined with `--group-by model`, Codex reasoning
 effort is appended when present, for example `gpt-5.5-high` or
 `gpt-5.5-xhigh`. Pricing still uses the base model name.
+
+`stat --limit-window 5h|7d` joins token usage with observed server
+rate-limit windows from local JSONL. Without `--group-by`, it emits one row per
+observed window. With `--group-by model|cwd|account`, it emits flat
+`(window_id, group_key)` rows. It does not guess windows that were not observed;
+usage that cannot be placed in an observed window is reported in an
+`observed=false` unobserved row with diagnostics. Time groupings such as
+`hour`, `day`, `week`, and `month` are not valid with `--limit-window`.
 
 Output options:
 
@@ -319,6 +266,116 @@ When a model has no configured price, it is excluded from Credits and listed in
 an unpriced-model breakdown with a stub you can fill into
 `data/codex-rate-card.json`.
 JSON output includes the same information under `unpricedModels`.
+
+### Rate Limits
+
+Syntax:
+
+```bash
+codex-ops limit current
+codex-ops limit windows
+codex-ops limit trend
+codex-ops limit resets
+codex-ops limit samples
+```
+
+`limit` reads local Codex session JSONL files and parses
+`payload.rate_limits`. It does not call Codex, OpenAI, or any network service.
+Reports are based only on observed local samples and show server-provided
+percentages and reset timestamps for 5-hour (`5h`) and 7-day (`7d`) windows.
+Human-readable and CSV time fields are displayed in the local timezone; JSON
+timestamps remain RFC 3339 UTC values. It does not infer absolute quota units.
+Except for `limit current`, limit subcommands default to the 7-day window.
+Use `--window 5h` to inspect the 5-hour window.
+`limit current` always reads the last 7 days and does not accept `--start`,
+`--end`, or `--last`. Other limit commands read the last 30 days of local
+session data by default when no explicit `--start`, `--end`, or `--last` is
+supplied. Supplying only `--end` uses a 30-day lookback ending at that time.
+
+If the latest data has `rate_limits:null`, lacks a window, or no sample exists
+in the requested range, the relevant output is marked `unobserved` instead of
+falling back to a guessed window. For each account/plan/limit/window partition,
+`current` shows the latest observed logical quota cycle; a later reset cycle
+replaces an earlier one even when the earlier cycle's reset timestamp is still
+in the future. If that latest cycle has ended, `current` marks it with an
+`expired` row status. Samples with
+`window_minutes <= 0` are treated as invalid and ignored. The current table,
+CSV, and Markdown outputs include `Window minutes` so a nonstandard `primary`
+window is visible instead of being mistaken for the standard 5-hour window, and
+they show the reset timestamp without a separate reset-seconds column. `limit
+windows` JSON keeps the machine-readable `id` field, while table, CSV, and
+Markdown output omit that long identifier and start with the
+window/account/plan/limit columns. `limit windows` merges reset timestamps within
+60 seconds into one logical window, so server-side reset jitter does not split a
+single quota window into many rows. Derived reports (`current`, `windows`,
+`trend`, and `resets`) ignore inactive quota streams whose samples stay at 0%
+and whose reset timestamp rolls forward with each sample; `limit samples` still
+shows those raw observations for debugging. Windows, current rows, trend changes,
+and reset events are partitioned by account, plan, limit id, and window length,
+so samples from different server quota streams are not compared against each
+other.
+`limit trend` is a change-point timeline built from observed rate-limit
+vectors. Repeated token-count snapshots inside the same rollout are compressed,
+expired reset windows are ignored, and reset timestamps within 60 seconds are
+treated as the same logical window. Within a logical window the displayed
+progress keeps the highest observed used percent, so stale snapshots from
+parallel sessions do not create false decreases. A selected window is only
+shown when that window's displayed value or reset time changes; sibling-window
+activity is not emitted as an extra row.
+`limit resets` only emits reset transitions inside one quota stream. A reset
+event requires a changed reset timestamp, a lower used percent, and a next reset
+time that is still active for the next sample; reset timestamp jitter within 60
+seconds is ignored. Verbose JSON diagnostics include counts for samples and
+reset events whose limit id was missing, because those unknown-limit rows are
+less precise than named quota streams.
+The old `--group-by hour|day` bucket mode is no longer supported.
+
+Examples:
+
+```bash
+codex-ops limit current
+codex-ops limit current --window 5h --json
+codex-ops limit windows --window 7d --format markdown
+codex-ops limit trend --window 5h
+codex-ops limit trend --window 7d --format csv
+codex-ops limit resets --window 7d
+codex-ops limit resets --window 7d --early-only
+codex-ops limit samples --window 5h --format json
+```
+
+Limit reports read `~/.codex/sessions` by default. Use `--codex-home` or
+`--sessions-dir` for alternate local data. When an account history file exists,
+samples are attributed by the account active at each sample timestamp; use
+`--account-id <id>` to filter to one account. `current` uses a fixed 7-day
+lookback. Other limit commands default to the last 30 days; use `-L, --last`,
+`--start`, or `--end` to narrow or pin their range.
+
+Limit commands:
+
+| Command | Output |
+| --- | --- |
+| `codex-ops limit current` | Current-cycle snapshot from the fixed 7-day lookback; each partition shows its latest logical cycle, marked active or expired. |
+| `codex-ops limit windows` | Observed server windows inferred from sample reset times; quota window defaults to `7d`; JSON includes `id`, non-JSON output omits it. |
+| `codex-ops limit trend` | Used-percent change timeline for one selected quota window; quota window defaults to `7d`. |
+| `codex-ops limit resets` | Reset events for one selected quota window, including early reset detection; quota window defaults to `7d`. |
+| `codex-ops limit samples` | Raw rate-limit samples after filters; quota window defaults to `7d`. |
+
+Limit options:
+
+| Option | Behavior |
+| --- | --- |
+| `--window <window>` | Include only `5h` or `7d` samples/windows; non-current limit commands default to `7d`. |
+| `--early-only` | For `resets`, include only resets before the prior reset time. |
+| `-A, --account-id <id>` | Only include one account id. |
+| `--account-history-file <path>` | Use a specific auth account history file. |
+| `--codex-home <path>` | Resolve sessions and account history under this Codex home. |
+| `--sessions-dir <path>` | Use a specific sessions directory. |
+| `-s, --start <time>` | Start time; not accepted by `current`. |
+| `-e, --end <time>` | End time; not accepted by `current`. |
+| `-L, --last <duration>` | Recent duration such as `12h`, `30d`, `2w`, or `1mo`; overrides the default 30-day range; not accepted by `current`. |
+| `-f, --format <format>` | Output `table`, `json`, `csv`, or `markdown`. |
+| `-j, --json` | Alias for `--format json`. |
+| `-v, --verbose` | Include scan diagnostics; with JSON, include source file/line evidence. |
 
 Pricing data is statically embedded from `data/codex-rate-card.json`. The
 current snapshot source is OpenAI Help Center Codex rate card, checked

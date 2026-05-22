@@ -1,8 +1,9 @@
 use super::reports::{
-    format_date_time, format_group_by, format_report_range, to_usage_session_detail_json,
-    to_usage_sessions_json, to_usage_stats_json, usage_warnings, TokenUsage, UsageDiagnostics,
-    UsageSessionCompactRow, UsageSessionDetailReport, UsageSessionEventRow, UsageSessionRow,
-    UsageSessionsReport, UsageStatRow, UsageStatsReport, UsageUnpricedModelRow,
+    format_date_time, format_group_by, format_report_range, to_limit_usage_json,
+    to_usage_session_detail_json, to_usage_sessions_json, to_usage_stats_json, usage_warnings,
+    LimitUsageReport, LimitUsageRow, TokenUsage, UsageDiagnostics, UsageSessionCompactRow,
+    UsageSessionDetailReport, UsageSessionEventRow, UsageSessionRow, UsageSessionsReport,
+    UsageStatRow, UsageStatsReport, UsageUnpricedModelRow,
 };
 use super::StatFormat;
 use crate::error::AppError;
@@ -57,6 +58,53 @@ pub(super) fn format_usage_stats(
 
     lines.push(format_plain_table(&rows));
     append_usage_notes(&mut lines, report, verbose);
+    Ok(lines.join("\n"))
+}
+
+pub(super) fn format_limit_usage(
+    report: &LimitUsageReport,
+    format: StatFormat,
+    verbose: bool,
+) -> Result<String, AppError> {
+    if format == StatFormat::Json {
+        return Ok(format!(
+            "{}\n",
+            to_pretty_json(&to_limit_usage_json(report))
+                .map_err(|error| AppError::new(error.to_string()))?
+        ));
+    }
+
+    let mut rows = vec![limit_usage_headers()];
+    rows.extend(report.rows.iter().map(limit_usage_row));
+    rows.push(limit_usage_total_row(&report.totals));
+
+    if format == StatFormat::Csv {
+        return Ok(format!("{}\n", format_csv(&rows)));
+    }
+
+    if format == StatFormat::Markdown {
+        let mut lines = vec![format_markdown_table(&rows)];
+        append_limit_usage_notes(&mut lines, report, verbose);
+        return Ok(format!("{}\n", lines.join("\n")));
+    }
+
+    let mut lines = vec![
+        "Codex usage by rate-limit window".to_string(),
+        format!("Range: {}", format_report_range(report.start, report.end)),
+        format!("Limit window: {}", report.limit_window),
+        format!("Grouped by: {}", report.group_by.as_str()),
+        format!("Sessions dir: {}", report.sessions_dir),
+        String::new(),
+    ];
+
+    if report.rows.is_empty() {
+        lines.push("No token usage records found in this range.".to_string());
+        append_limit_usage_notes(&mut lines, report, verbose);
+        return Ok(lines.join("\n"));
+    }
+
+    lines.push(format_plain_table(&rows));
+    append_limit_usage_notes(&mut lines, report, verbose);
     Ok(lines.join("\n"))
 }
 
@@ -387,6 +435,79 @@ fn append_usage_notes<T: UsageReportNotes>(lines: &mut Vec<String>, report: &T, 
     }
 }
 
+fn append_limit_usage_notes(lines: &mut Vec<String>, report: &LimitUsageReport, verbose: bool) {
+    append_unpriced_notes(lines, &report.totals, &report.unpriced_models);
+
+    if verbose {
+        if let Some(diagnostics) = &report.diagnostics {
+            lines.push(String::new());
+            lines.push("Diagnostics:".to_string());
+            lines.push(format!(
+                "  Observed windows: {}",
+                format_integer(diagnostics.observed_windows)
+            ));
+            lines.push(format!(
+                "  Unobserved usage events: {}",
+                format_integer(diagnostics.unobserved_usage_events)
+            ));
+            lines.push(format!(
+                "  Usage events included: {}",
+                format_integer(diagnostics.usage.included_usage_events)
+            ));
+            lines.push(format!(
+                "  Rate-limit samples included: {}",
+                format_integer(diagnostics.rate_limits.included_samples)
+            ));
+            lines.push(format!(
+                "  Full files read: {}",
+                format_integer(diagnostics.usage.read_files)
+            ));
+            lines.push(format!(
+                "  Lines read: {}",
+                format_integer(diagnostics.usage.read_lines)
+            ));
+        }
+    }
+
+    let warnings = super::reports::limit_usage_warnings(report);
+    if !warnings.is_empty() {
+        lines.push(String::new());
+        lines.extend(warnings);
+    }
+}
+
+fn append_unpriced_notes(
+    lines: &mut Vec<String>,
+    totals: &UsageStatRow,
+    unpriced_models: &[UsageUnpricedModelRow],
+) {
+    if totals.unpriced_calls == 0 {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "Note: {} usage events had no credit price and are excluded from Credits.",
+        format_integer(totals.unpriced_calls)
+    ));
+
+    if !unpriced_models.is_empty() {
+        lines.push("Unpriced models:".to_string());
+        for row in unpriced_models {
+            lines.push(format!(
+                "  {}: {} calls, {} tokens",
+                row.model,
+                format_integer(row.calls),
+                format_integer(row.total_tokens)
+            ));
+        }
+        lines.push("Pricing stubs for data/codex-rate-card.json:".to_string());
+        for row in unpriced_models {
+            lines.push(indent_block(&row.pricing_stub, "  "));
+        }
+    }
+}
+
 fn append_session_detail_breakdown(lines: &mut Vec<String>, label: &str, rows: &[UsageStatRow]) {
     if rows.is_empty() {
         return;
@@ -429,6 +550,78 @@ fn usage_row(row: &UsageStatRow) -> Vec<String> {
         format_integer(row.usage.total_tokens),
         format_credits(row.credits),
         format_usd(row.usd),
+    ]
+}
+
+fn limit_usage_headers() -> Vec<String> {
+    [
+        "Window ID",
+        "Window",
+        "Window start",
+        "Reset at",
+        "Observed",
+        "Group",
+        "Group key",
+        "Sessions",
+        "Calls",
+        "Input",
+        "Cached",
+        "Output",
+        "Reasoning",
+        "Total",
+        "Credits",
+        "USD",
+        "Priced",
+        "Unpriced",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn limit_usage_row(row: &LimitUsageRow) -> Vec<String> {
+    vec![
+        row.window_id.clone(),
+        row.window.clone(),
+        row.window_start.map(format_date_time).unwrap_or_default(),
+        row.reset_at.map(format_date_time).unwrap_or_default(),
+        row.observed.to_string(),
+        row.group_by.to_string(),
+        row.group_key.clone(),
+        format_integer(row.sessions as i64),
+        format_integer(row.calls),
+        format_integer(row.usage.input_tokens),
+        format_integer(row.usage.cached_input_tokens),
+        format_integer(row.usage.output_tokens),
+        format_integer(row.usage.reasoning_output_tokens),
+        format_integer(row.usage.total_tokens),
+        format_credits(row.credits),
+        format_usd(row.usd),
+        format_integer(row.priced_calls),
+        format_integer(row.unpriced_calls),
+    ]
+}
+
+fn limit_usage_total_row(row: &UsageStatRow) -> Vec<String> {
+    vec![
+        "Total".to_string(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        format_integer(row.sessions as i64),
+        format_integer(row.calls),
+        format_integer(row.usage.input_tokens),
+        format_integer(row.usage.cached_input_tokens),
+        format_integer(row.usage.output_tokens),
+        format_integer(row.usage.reasoning_output_tokens),
+        format_integer(row.usage.total_tokens),
+        format_credits(row.credits),
+        format_usd(row.usd),
+        format_integer(row.priced_calls),
+        format_integer(row.unpriced_calls),
     ]
 }
 

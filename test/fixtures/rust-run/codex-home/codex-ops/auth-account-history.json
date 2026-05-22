@@ -8,5 +8,12 @@
     "email": "fixture@example.test",
     "planType": "pro"
   },
-  "switches": []
+  "switches": [
+    {
+      "timestamp": "2026-05-12T12:30:00.000Z",
+      "fromAccountId": "account-fixture",
+      "toAccountId": "account-other",
+      "source": "auth select"
+    }
+  ]
 }
