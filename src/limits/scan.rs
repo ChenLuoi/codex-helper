@@ -6,8 +6,9 @@ use super::reports::{
 use crate::account_history::{self, UsageAccountHistory};
 use crate::error::AppError;
 use crate::session_scan::{
-    prepare_session_scan, session_id_from_path, PreparedSessionFile, SessionScanDiagnostics,
-    SessionScanOptions, SESSION_READ_BUFFER_SIZE,
+    partition_items_for_workers, prepare_session_scan, resolve_session_file_scan_worker_count,
+    session_id_from_path, PreparedSessionFile, SessionScanDiagnostics, SessionScanOptions,
+    SESSION_READ_BUFFER_SIZE,
 };
 use crate::storage::path_to_string;
 use crate::time::DateRange;
@@ -16,6 +17,7 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::thread;
 
 const RATE_LIMIT_FILE_READ_CONCURRENCY: i64 = 1;
 
@@ -42,17 +44,16 @@ pub fn read_rate_limit_samples_report(
     )?;
     merge_session_scan(&mut diagnostics, &prepared.diagnostics);
 
-    let mut samples = Vec::new();
-    for file in &prepared.files {
-        let mut file_samples = read_rate_limit_samples_from_file(
-            file,
-            range,
-            account_history.as_ref(),
-            options,
-            &mut diagnostics,
-        )?;
-        samples.append(&mut file_samples);
-    }
+    let worker_count = resolve_session_file_scan_worker_count(prepared.files.len())?;
+    diagnostics.file_read_concurrency = worker_count as i64;
+    let mut samples = read_rate_limit_samples_from_files(
+        &prepared.files,
+        range,
+        account_history.as_ref(),
+        options,
+        worker_count,
+        &mut diagnostics,
+    )?;
 
     samples.sort_by(|left, right| {
         left.timestamp
@@ -69,6 +70,71 @@ pub fn read_rate_limit_samples_report(
         samples,
         diagnostics,
     })
+}
+
+fn read_rate_limit_samples_from_files(
+    files: &[PreparedSessionFile],
+    range: DateRange,
+    account_history: Option<&UsageAccountHistory>,
+    options: &RateLimitSamplesReadOptions,
+    worker_count: usize,
+    diagnostics: &mut RateLimitDiagnostics,
+) -> Result<Vec<RateLimitSample>, AppError> {
+    if worker_count <= 1 {
+        let (samples, file_diagnostics) =
+            scan_rate_limit_files(files, range, account_history, options)?;
+        diagnostics.merge_file_scan(&file_diagnostics);
+        return Ok(samples);
+    }
+
+    let partitions = partition_items_for_workers(files, worker_count);
+    let mut partial_results =
+        thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(partitions.len());
+
+            for partition in partitions {
+                handles.push(scope.spawn(move || {
+                    scan_rate_limit_files(&partition, range, account_history, options)
+                }));
+            }
+
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| AppError::new("Rust limit file scan worker panicked."))??;
+                results.push(result);
+            }
+            Ok::<_, AppError>(results)
+        })?;
+
+    let mut samples = Vec::new();
+    for (mut partial_samples, file_diagnostics) in partial_results.drain(..) {
+        diagnostics.merge_file_scan(&file_diagnostics);
+        samples.append(&mut partial_samples);
+    }
+    Ok(samples)
+}
+
+fn scan_rate_limit_files(
+    files: &[PreparedSessionFile],
+    range: DateRange,
+    account_history: Option<&UsageAccountHistory>,
+    options: &RateLimitSamplesReadOptions,
+) -> Result<(Vec<RateLimitSample>, RateLimitDiagnostics), AppError> {
+    let mut diagnostics = RateLimitDiagnostics::default();
+    let mut samples = Vec::new();
+    for file in files {
+        let mut file_samples = read_rate_limit_samples_from_file(
+            file,
+            range,
+            account_history,
+            options,
+            &mut diagnostics,
+        )?;
+        samples.append(&mut file_samples);
+    }
+    Ok((samples, diagnostics))
 }
 
 fn merge_session_scan(diagnostics: &mut RateLimitDiagnostics, session: &SessionScanDiagnostics) {

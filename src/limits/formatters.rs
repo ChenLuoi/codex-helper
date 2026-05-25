@@ -6,7 +6,8 @@ use super::{
 };
 use crate::error::AppError;
 use crate::format::{
-    format_csv, format_integer, format_markdown_table, format_plain_table, to_pretty_json,
+    format_credits, format_csv, format_integer, format_markdown_table, format_plain_table,
+    format_usd, to_pretty_json,
 };
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 
@@ -276,6 +277,9 @@ fn current_headers() -> Vec<String> {
         "Remaining".to_string(),
         "Resets at".to_string(),
         "Last seen".to_string(),
+        "Total tokens".to_string(),
+        "Credits".to_string(),
+        "USD".to_string(),
     ]
 }
 
@@ -291,6 +295,9 @@ fn current_row(row: &LimitCurrentWindow) -> Vec<String> {
         optional_percent(row.remaining_percent),
         optional_date_time(row.resets_at),
         optional_date_time(row.last_seen),
+        format_integer(row.total_tokens),
+        format_credits(row.credits),
+        format_usd(row.usd),
     ]
 }
 
@@ -309,6 +316,9 @@ fn window_headers() -> Vec<String> {
         "Last used".to_string(),
         "Samples".to_string(),
         "Reset kind".to_string(),
+        "Total tokens".to_string(),
+        "Credits".to_string(),
+        "USD".to_string(),
     ]
 }
 
@@ -327,6 +337,9 @@ fn window_row(row: &LimitWindow) -> Vec<String> {
         format_percent(row.last_used_percent),
         format_integer(row.sample_count),
         row.reset_kind.clone(),
+        format_integer(row.total_tokens),
+        format_credits(row.credits),
+        format_usd(row.usd),
     ]
 }
 

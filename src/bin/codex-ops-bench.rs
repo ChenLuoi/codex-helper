@@ -140,6 +140,22 @@ const BENCHMARK_CASES: &[BenchCase] = &[
             "{sessionsDir}",
         ],
     },
+    BenchCase {
+        id: "limit-windows-json",
+        groups: &["limit"],
+        args: &[
+            "limit",
+            "windows",
+            "--window",
+            "7d",
+            "--format",
+            "json",
+            "--account-history-file",
+            "{accountHistoryFile}",
+            "--sessions-dir",
+            "{sessionsDir}",
+        ],
+    },
 ];
 
 #[derive(Debug)]

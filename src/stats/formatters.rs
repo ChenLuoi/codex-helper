@@ -1,9 +1,9 @@
 use super::reports::{
     format_date_time, format_group_by, format_report_range, to_limit_usage_json,
     to_usage_session_detail_json, to_usage_sessions_json, to_usage_stats_json, usage_warnings,
-    LimitUsageReport, LimitUsageRow, TokenUsage, UsageDiagnostics, UsageSessionCompactRow,
-    UsageSessionDetailReport, UsageSessionEventRow, UsageSessionRow, UsageSessionsReport,
-    UsageStatRow, UsageStatsReport, UsageUnpricedModelRow,
+    LimitUsageGroupBy, LimitUsageReport, LimitUsageRow, TokenUsage, UsageDiagnostics,
+    UsageSessionCompactRow, UsageSessionDetailReport, UsageSessionEventRow, UsageSessionRow,
+    UsageSessionsReport, UsageStatRow, UsageStatsReport, UsageUnpricedModelRow,
 };
 use super::StatFormat;
 use crate::error::AppError;
@@ -74,9 +74,14 @@ pub(super) fn format_limit_usage(
         ));
     }
 
-    let mut rows = vec![limit_usage_headers()];
-    rows.extend(report.rows.iter().map(limit_usage_row));
-    rows.push(limit_usage_total_row(&report.totals));
+    let mut rows = vec![limit_usage_headers(report.group_by)];
+    rows.extend(
+        report
+            .rows
+            .iter()
+            .map(|row| limit_usage_row(row, report.group_by)),
+    );
+    rows.push(limit_usage_total_row(&report.totals, report.group_by));
 
     if format == StatFormat::Csv {
         return Ok(format!("{}\n", format_csv(&rows)));
@@ -553,41 +558,56 @@ fn usage_row(row: &UsageStatRow) -> Vec<String> {
     ]
 }
 
-fn limit_usage_headers() -> Vec<String> {
-    [
-        "Window ID",
+fn limit_usage_headers(group_by: LimitUsageGroupBy) -> Vec<String> {
+    let mut headers = [
         "Window",
+        "Account",
+        "Plan",
+        "Limit",
         "Window start",
         "Reset at",
         "Observed",
-        "Group",
-        "Group key",
-        "Sessions",
-        "Calls",
-        "Input",
-        "Cached",
-        "Output",
-        "Reasoning",
-        "Total",
-        "Credits",
-        "USD",
-        "Priced",
-        "Unpriced",
     ]
     .into_iter()
     .map(str::to_string)
-    .collect()
+    .collect::<Vec<_>>();
+    if let Some(label) = limit_usage_group_header(group_by) {
+        headers.push(label.to_string());
+    }
+    headers.extend(
+        [
+            "Sessions",
+            "Calls",
+            "Input",
+            "Cached",
+            "Output",
+            "Reasoning",
+            "Total",
+            "Credits",
+            "USD",
+            "Priced",
+            "Unpriced",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    headers
 }
 
-fn limit_usage_row(row: &LimitUsageRow) -> Vec<String> {
-    vec![
-        row.window_id.clone(),
+fn limit_usage_row(row: &LimitUsageRow, group_by: LimitUsageGroupBy) -> Vec<String> {
+    let mut cells = vec![
         row.window.clone(),
+        optional_cell(row.account_id.as_deref()),
+        optional_cell(row.plan_type.as_deref()),
+        optional_cell(row.limit_id.as_deref()),
         row.window_start.map(format_date_time).unwrap_or_default(),
         row.reset_at.map(format_date_time).unwrap_or_default(),
         row.observed.to_string(),
-        row.group_by.to_string(),
-        row.group_key.clone(),
+    ];
+    if group_by != LimitUsageGroupBy::Window {
+        cells.push(row.group_key.clone());
+    }
+    cells.extend([
         format_integer(row.sessions as i64),
         format_integer(row.calls),
         format_integer(row.usage.input_tokens),
@@ -599,11 +619,12 @@ fn limit_usage_row(row: &LimitUsageRow) -> Vec<String> {
         format_usd(row.usd),
         format_integer(row.priced_calls),
         format_integer(row.unpriced_calls),
-    ]
+    ]);
+    cells
 }
 
-fn limit_usage_total_row(row: &UsageStatRow) -> Vec<String> {
-    vec![
+fn limit_usage_total_row(row: &UsageStatRow, group_by: LimitUsageGroupBy) -> Vec<String> {
+    let mut cells = vec![
         "Total".to_string(),
         String::new(),
         String::new(),
@@ -611,6 +632,11 @@ fn limit_usage_total_row(row: &UsageStatRow) -> Vec<String> {
         String::new(),
         String::new(),
         String::new(),
+    ];
+    if group_by != LimitUsageGroupBy::Window {
+        cells.push(String::new());
+    }
+    cells.extend([
         format_integer(row.sessions as i64),
         format_integer(row.calls),
         format_integer(row.usage.input_tokens),
@@ -622,7 +648,21 @@ fn limit_usage_total_row(row: &UsageStatRow) -> Vec<String> {
         format_usd(row.usd),
         format_integer(row.priced_calls),
         format_integer(row.unpriced_calls),
-    ]
+    ]);
+    cells
+}
+
+fn limit_usage_group_header(group_by: LimitUsageGroupBy) -> Option<&'static str> {
+    match group_by {
+        LimitUsageGroupBy::Window => None,
+        LimitUsageGroupBy::Model => Some("Model"),
+        LimitUsageGroupBy::Cwd => Some("CWD"),
+        LimitUsageGroupBy::Account => Some("Usage account"),
+    }
+}
+
+fn optional_cell(value: Option<&str>) -> String {
+    value.unwrap_or_default().to_string()
 }
 
 fn session_headers() -> Vec<String> {
