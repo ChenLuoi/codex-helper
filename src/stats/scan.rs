@@ -1,7 +1,9 @@
 use super::cli::ResolvedStatOptions;
 use super::events::{parse_usage_json_event, UsageJsonPayload};
+use super::reports::{TokenUsage, UsageDiagnostics, UsageRateLimit, UsageRecordView};
 use crate::account_history::UsageAccountHistory;
 use crate::error::AppError;
+use crate::limits::{parse_rate_limit_line, RateLimitLineContext, RateLimitParseDiagnostics};
 use crate::session_scan::{
     partition_items_for_workers, prepare_session_scan, resolve_session_file_scan_worker_count,
     session_id_from_path, PreparedSessionFile, SessionScanOptions, DEFAULT_FILE_READ_CONCURRENCY,
@@ -14,8 +16,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::thread;
-
-use super::reports::{TokenUsage, UsageDiagnostics, UsageRecordView};
 
 pub(super) trait UsageRecordAccumulator: Send {
     fn add_record(&mut self, record: UsageRecordView<'_>);
@@ -439,6 +439,7 @@ where
         }
 
         diagnostics.included_usage_events += 1;
+        let rate_limits = usage_rate_limits_from_line(&line, &session_id, account_id.as_deref());
         let record = UsageRecordView {
             timestamp,
             session_id: &session_id,
@@ -447,12 +448,43 @@ where
             cwd: &cwd,
             account_id: account_id.as_deref(),
             file_path: &file_path,
+            rate_limits: &rate_limits,
             usage: &usage,
         };
         on_record.on_record(record);
     }
 
     Ok(diagnostics)
+}
+
+fn usage_rate_limits_from_line(
+    line: &str,
+    session_id: &str,
+    account_id: Option<&str>,
+) -> Vec<UsageRateLimit> {
+    if !line.contains("\"rate_limits\"") {
+        return Vec::new();
+    }
+
+    let mut diagnostics = RateLimitParseDiagnostics::default();
+    parse_rate_limit_line(
+        line,
+        RateLimitLineContext {
+            session_id,
+            account_id,
+            source: None,
+        },
+        &mut diagnostics,
+    )
+    .into_iter()
+    .map(|sample| UsageRateLimit {
+        plan_type: sample.plan_type,
+        limit_id: sample.limit_id,
+        window: sample.window,
+        window_minutes: sample.window_minutes,
+        resets_at: sample.resets_at,
+    })
+    .collect()
 }
 
 fn resolve_usage_account_id(
@@ -516,6 +548,40 @@ mod tests {
         assert_eq!(report.records[0].file_path, path_to_string(archived_file));
         assert_eq!(report.records[0].usage.total_tokens, 2);
         assert_eq!(report.diagnostics.read_files, 1);
+    }
+
+    #[test]
+    fn usage_scan_captures_rate_limits_from_token_count_line() {
+        let temp = TempDir::new().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        write_session_file(
+            &sessions_dir,
+            2026,
+            5,
+            21,
+            "rollout-2026-05-21T00-00-00-token-count-rate-limits.jsonl",
+            &[
+                session_meta_line("2026-05-21T00:00:00.000Z", "session-with-limits"),
+                token_count_with_rate_limits_line("2026-05-21T00:00:01.000Z"),
+            ],
+        );
+
+        let report = read_usage_records_report(&UsageRecordsReadOptions {
+            start: utc_time(2026, 5, 21, 0),
+            end: utc_time(2026, 5, 21, 1),
+            sessions_dir,
+            scan_all_files: false,
+            account_history_file: None,
+            account_id: None,
+        })
+        .expect("read usage report");
+
+        assert_eq!(report.records.len(), 1);
+        let rate_limits = &report.records[0].rate_limits;
+        assert_eq!(rate_limits.len(), 2);
+        assert_eq!(rate_limits[0].window, "5h");
+        assert_eq!(rate_limits[0].limit_id.as_deref(), Some("token-line-limit"));
+        assert_eq!(rate_limits[1].window, "7d");
     }
 
     #[test]
@@ -835,6 +901,40 @@ mod tests {
         format!(
             r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":2}}}}}}}}"#
         )
+    }
+
+    fn token_count_with_rate_limits_line(timestamp: &str) -> String {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 1,
+                        "reasoning_output_tokens": 0,
+                        "total_tokens": 2
+                    }
+                },
+                "rate_limits": {
+                    "primary": {
+                        "window_minutes": 300,
+                        "used_percent": 10.0,
+                        "resets_at": 1779343200
+                    },
+                    "secondary": {
+                        "window_minutes": 10080,
+                        "used_percent": 20.0,
+                        "resets_at": 1779948000
+                    },
+                    "plan_type": "pro",
+                    "limit_id": "token-line-limit"
+                }
+            }
+        })
+        .to_string()
     }
 
     fn token_count_total_line(timestamp: &str, last_total: i64, total: i64) -> String {

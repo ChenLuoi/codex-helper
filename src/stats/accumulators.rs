@@ -25,6 +25,9 @@ struct MutableStatRow {
 
 struct MutableLimitUsageRow {
     window_id: String,
+    account_id: Option<String>,
+    plan_type: Option<String>,
+    limit_id: Option<String>,
     window: String,
     window_minutes: i64,
     window_start: Option<DateTime<Utc>>,
@@ -401,7 +404,8 @@ impl LimitUsageAccumulator {
     }
 
     fn window_for_record(&self, record: &UsageRecordView<'_>) -> Option<&LimitWindow> {
-        self.windows
+        let candidates = self
+            .windows
             .iter()
             .filter(|window| {
                 record.timestamp >= window.estimated_start && record.timestamp < window.reset_at
@@ -413,12 +417,37 @@ impl LimitUsageAccumulator {
                     .is_none_or(|window_account| window_account == account_id),
                 None => window.account_id.is_none(),
             })
-            .max_by(|left, right| {
-                left.estimated_start
-                    .cmp(&right.estimated_start)
-                    .then_with(|| left.reset_at.cmp(&right.reset_at))
-                    .then_with(|| left.id.cmp(&right.id))
-            })
+            .collect::<Vec<_>>();
+
+        if !record.rate_limits.is_empty() {
+            return candidates
+                .into_iter()
+                .filter(|window| {
+                    record.rate_limits.iter().any(|rate_limit| {
+                        rate_limit.window_minutes == window.window_minutes
+                            && (rate_limit.resets_at - window.reset_at).num_seconds().abs() <= 60
+                            && rate_limit.plan_type.as_deref() == window.plan_type.as_deref()
+                            && rate_limit.limit_id.as_deref() == window.limit_id.as_deref()
+                    })
+                })
+                .max_by(|left, right| {
+                    left.estimated_start
+                        .cmp(&right.estimated_start)
+                        .then_with(|| left.reset_at.cmp(&right.reset_at))
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+        }
+
+        if candidates.len() != 1 {
+            return None;
+        }
+
+        candidates.into_iter().max_by(|left, right| {
+            left.estimated_start
+                .cmp(&right.estimated_start)
+                .then_with(|| left.reset_at.cmp(&right.reset_at))
+                .then_with(|| left.id.cmp(&right.id))
+        })
     }
 }
 
@@ -872,6 +901,9 @@ fn mutable_limit_usage_row(
     match window {
         Some(window) => MutableLimitUsageRow {
             window_id: window.id.clone(),
+            account_id: window.account_id.clone(),
+            plan_type: window.plan_type.clone(),
+            limit_id: window.limit_id.clone(),
             window: window.window.clone(),
             window_minutes: window.window_minutes,
             window_start: Some(window.estimated_start),
@@ -888,6 +920,9 @@ fn mutable_limit_usage_row(
         },
         None => MutableLimitUsageRow {
             window_id: format!("unobserved:{}", selector.as_str()),
+            account_id: None,
+            plan_type: None,
+            limit_id: None,
             window: selector.as_str().to_string(),
             window_minutes: selector.window_minutes(),
             window_start: None,
@@ -908,6 +943,9 @@ fn mutable_limit_usage_row(
 fn limit_usage_row(row: MutableLimitUsageRow) -> LimitUsageRow {
     LimitUsageRow {
         window_id: row.window_id,
+        account_id: row.account_id,
+        plan_type: row.plan_type,
+        limit_id: row.limit_id,
         window: row.window,
         window_minutes: row.window_minutes,
         window_start: row.window_start,
@@ -1426,6 +1464,7 @@ mod tests {
             cwd,
             account_id: None,
             file_path,
+            rate_limits: &[],
             usage,
         }
     }

@@ -464,7 +464,15 @@ fn stat_limit_window_usage_outputs_real_window_rows() {
     );
     assert_success(&csv, "stat limit-window csv");
     let csv_rows = parse_csv(&csv.stdout);
-    assert_eq!(csv_rows[0][0], "Window ID", "limit usage csv first header");
+    assert_eq!(csv_rows[0][0], "Window", "limit usage csv first header");
+    assert!(
+        !csv_rows[0].iter().any(|header| header == "Window ID"),
+        "limit usage csv should omit window id"
+    );
+    assert!(
+        !csv_rows[0].iter().any(|header| header == "Group key"),
+        "limit usage csv should omit group key"
+    );
     assert_eq!(
         csv_rows.last().unwrap()[0],
         "Total",
@@ -489,8 +497,16 @@ fn stat_limit_window_usage_outputs_real_window_rows() {
     assert_success(&markdown, "stat limit-window markdown");
     assert_contains(
         &markdown.stdout,
-        "| Window ID | Window |",
+        "| Window | Account | Plan | Limit | Window start |",
         "limit usage markdown header",
+    );
+    assert!(
+        !markdown.stdout.contains("Window ID"),
+        "limit usage markdown should omit window id"
+    );
+    assert!(
+        !markdown.stdout.contains("Group key"),
+        "limit usage markdown should omit group key"
     );
 }
 
@@ -504,9 +520,9 @@ fn stat_limit_window_prefers_newer_overlap_and_shapes_rows() {
         [
             r#"{"timestamp":"2026-05-10T09:00:00.000Z","type":"session_meta","payload":{"id":"early-reset","model":"gpt-5.5","cwd":"/workspace/early-reset","reasoning_effort":"medium"}}"#,
             r#"{"timestamp":"2026-05-10T09:00:01.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":40.0,"resets_at":1778421600},"secondary":{"window_minutes":10080,"used_percent":80.0,"resets_at":1779008400},"plan_type":"pro","limit_id":"early-reset-limit"}}}"#,
-            r#"{"timestamp":"2026-05-10T09:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100},"total_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100}}}}"#,
+            r#"{"timestamp":"2026-05-10T09:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100},"total_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100}},"rate_limits":{"primary":{"window_minutes":300,"used_percent":40.0,"resets_at":1778421600},"secondary":{"window_minutes":10080,"used_percent":80.0,"resets_at":1779008400},"plan_type":"pro","limit_id":"early-reset-limit"}}}"#,
             r#"{"timestamp":"2026-05-12T12:00:00.000Z","type":"event_msg","payload":{"rate_limits":{"primary":{"window_minutes":300,"used_percent":5.0,"resets_at":1778605200},"secondary":{"window_minutes":10080,"used_percent":4.0,"resets_at":1779192000},"plan_type":"pro","limit_id":"early-reset-limit"}}}"#,
-            r#"{"timestamp":"2026-05-12T12:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":160,"cached_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":200},"total_token_usage":{"input_tokens":240,"cached_input_tokens":0,"output_tokens":60,"reasoning_output_tokens":0,"total_tokens":300}}}}"#,
+            r#"{"timestamp":"2026-05-12T12:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":160,"cached_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":200},"total_token_usage":{"input_tokens":240,"cached_input_tokens":0,"output_tokens":60,"reasoning_output_tokens":0,"total_tokens":300}},"rate_limits":{"primary":{"window_minutes":300,"used_percent":5.0,"resets_at":1778605200},"secondary":{"window_minutes":10080,"used_percent":4.0,"resets_at":1779192000},"plan_type":"pro","limit_id":"early-reset-limit"}}}"#,
         ]
         .join("\n"),
     )

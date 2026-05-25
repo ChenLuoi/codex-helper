@@ -34,6 +34,11 @@ fn limit_current_json_reports_latest_state_and_unobserved() {
     let expired_five_hour = find_row(rows, "5h", "account-fixture", "pro");
     assert_json_eq(&expired_five_hour["status"], "expired", "fixture 5h status");
     assert_json_eq(&expired_five_hour["usedPercent"], 8.0, "expired 5h used");
+    assert_json_eq(
+        &expired_five_hour["totalTokens"],
+        0,
+        "expired 5h usage total",
+    );
     assert!(
         expired_five_hour["resetInSeconds"].is_null(),
         "expired 5h reset seconds"
@@ -115,6 +120,9 @@ fn limit_current_table_shows_status_and_nonstandard_primary_minutes() {
             "Remaining",
             "Resets at",
             "Last seen",
+            "Total tokens",
+            "Credits",
+            "USD",
         ],
         "limit current csv header"
     );
@@ -197,10 +205,13 @@ fn limit_windows_json_is_sorted_and_uses_fixed_window_schema() {
     assert_json_eq(&rows[0]["resetAt"], "2026-05-11T09:00:00Z", "first reset");
     assert_json_eq(&rows[0]["sampleCount"], 2, "first window sample count");
     assert_json_eq(&rows[0]["resetKind"], "firstObserved", "first reset kind");
+    assert_json_eq(&rows[0]["totalTokens"], 3100, "first window usage");
     assert_json_eq(&rows[1]["resetAt"], "2026-05-18T09:00:00Z", "second reset");
     assert_json_eq(&rows[1]["resetKind"], "normal", "normal reset kind");
+    assert_json_eq(&rows[1]["totalTokens"], 500, "second window usage");
     assert_json_eq(&rows[2]["resetAt"], "2026-05-19T09:00:00Z", "third reset");
     assert_json_eq(&rows[2]["resetKind"], "early", "early reset kind");
+    assert_json_eq(&rows[2]["totalTokens"], 0, "third window usage");
     assert!(rows
         .windows(2)
         .all(|pair| pair[0]["resetAt"].as_str() <= pair[1]["resetAt"].as_str()));
@@ -222,6 +233,9 @@ fn limit_windows_json_is_sorted_and_uses_fixed_window_schema() {
     );
     assert_contains(&table.stdout, "Window", "windows table window header");
     assert_contains(&table.stdout, "Account", "windows table account header");
+    assert_contains(&table.stdout, "Total tokens", "windows table usage header");
+    assert_contains(&table.stdout, "Credits", "windows table credits header");
+    assert_contains(&table.stdout, "USD", "windows table usd header");
     assert_not_contains(&table.stdout, "ID", "windows table should omit id header");
 
     let default_windows = run_codex_ops(limit_args(&sandbox, "windows", &["--json"]), &sandbox);
@@ -320,7 +334,7 @@ fn limit_trend_json_table_csv_and_markdown_are_change_points() {
         .iter()
         .filter(|change| change["limitId"] == "fixture-trend-change")
         .collect::<Vec<_>>();
-    assert_eq!(fixture_changes.len(), 4);
+    assert_eq!(fixture_changes.len(), 3);
     assert!(
         fixture_changes
             .iter()
@@ -350,20 +364,14 @@ fn limit_trend_json_table_csv_and_markdown_are_change_points() {
         5.0,
         "trend increase delta",
     );
-    assert_json_eq(&fixture_changes[2]["kind"], "decreased", "trend decrease");
+    assert_json_eq(
+        &fixture_changes[2]["kind"],
+        "resetChanged",
+        "trend reset change",
+    );
     assert_json_eq(
         &fixture_changes[2]["deltaUsedPercent"],
         -10.0,
-        "trend decrease delta",
-    );
-    assert_json_eq(
-        &fixture_changes[3]["kind"],
-        "resetChanged",
-        "trend reset changed",
-    );
-    assert_json_eq(
-        &fixture_changes[3]["deltaUsedPercent"],
-        0.0,
         "trend reset delta",
     );
     assert_no_source_paths_by_default(&report, "limit trend json");

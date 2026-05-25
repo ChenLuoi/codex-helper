@@ -3,12 +3,15 @@ use super::formatters::{
     format_limit_windows,
 };
 use super::{
-    build_limit_current_report, build_limit_resets_report, build_limit_samples_report,
-    build_limit_trend_report, build_limit_windows_report, read_rate_limit_samples_report,
-    LimitReportOptions, LimitWindowSelector, RateLimitSamplesReadOptions,
+    attach_usage_to_limit_current, attach_usage_to_limit_windows, build_limit_current_report,
+    build_limit_resets_report, build_limit_samples_report, build_limit_trend_report,
+    build_limit_windows_report, limit_current_usage_range, limit_windows_usage_range,
+    read_rate_limit_samples_report, LimitReportOptions, LimitWindowSelector,
+    RateLimitSamplesReadOptions,
 };
 use crate::auth::{ensure_usage_account_history, AuthCommandOptions};
 use crate::error::AppError;
+use crate::stats::{read_usage_records_report, UsageRecord, UsageRecordsReadOptions};
 use crate::storage::{resolve_storage_paths, StorageOptions};
 use crate::time::{self, DateBound, RawRangeOptions};
 use chrono::{DateTime, Duration, Utc};
@@ -102,11 +105,19 @@ pub fn run_limit_command(
 
     match command {
         LimitCommand::Current => {
-            let report = build_limit_current_report(&samples, now, report_options);
+            let mut report = build_limit_current_report(&samples, now, report_options);
+            if let Some((start, end)) = limit_current_usage_range(&report.current) {
+                let records = read_limit_usage_records(&resolved, start, end)?;
+                attach_usage_to_limit_current(&mut report.current, &records);
+            }
             format_limit_current(&report, resolved.format, resolved.verbose)
         }
         LimitCommand::Windows => {
-            let report = build_limit_windows_report(&samples, report_options);
+            let mut report = build_limit_windows_report(&samples, report_options);
+            if let Some((start, end)) = limit_windows_usage_range(&report.windows) {
+                let records = read_limit_usage_records(&resolved, start, end)?;
+                attach_usage_to_limit_windows(&mut report.windows, &records);
+            }
             format_limit_windows(&report, resolved.format, resolved.verbose)
         }
         LimitCommand::Trend => {
@@ -130,6 +141,22 @@ fn command_window_minutes(command: LimitCommand, window_minutes: Option<i64>) ->
         (_, None) => Some(LimitWindowSelector::SevenDays.window_minutes()),
         (_, Some(window_minutes)) => Some(window_minutes),
     }
+}
+
+fn read_limit_usage_records(
+    resolved: &ResolvedLimitOptions,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<UsageRecord>, AppError> {
+    Ok(read_usage_records_report(&UsageRecordsReadOptions {
+        start,
+        end,
+        sessions_dir: resolved.sessions_dir.clone(),
+        scan_all_files: false,
+        account_history_file: resolved.account_history_file.clone(),
+        account_id: resolved.account_id.clone(),
+    })?
+    .records)
 }
 
 fn resolve_limit_options(

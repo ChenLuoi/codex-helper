@@ -107,7 +107,17 @@ pub struct UsageRecord {
     pub cwd: String,
     pub account_id: Option<String>,
     pub file_path: String,
+    pub rate_limits: Vec<UsageRateLimit>,
     pub usage: TokenUsage,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageRateLimit {
+    pub plan_type: Option<String>,
+    pub limit_id: Option<String>,
+    pub window: String,
+    pub window_minutes: i64,
+    pub resets_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,6 +129,7 @@ pub(super) struct UsageRecordView<'a> {
     pub(super) cwd: &'a str,
     pub(super) account_id: Option<&'a str>,
     pub(super) file_path: &'a str,
+    pub(super) rate_limits: &'a [UsageRateLimit],
     pub(super) usage: &'a TokenUsage,
 }
 
@@ -132,6 +143,7 @@ impl UsageRecordView<'_> {
             cwd: self.cwd.to_string(),
             account_id: self.account_id.map(str::to_string),
             file_path: self.file_path.to_string(),
+            rate_limits: self.rate_limits.to_vec(),
             usage: self.usage.clone(),
         }
     }
@@ -282,6 +294,9 @@ pub(super) struct UsageStatsReport {
 #[serde(rename_all = "camelCase")]
 pub(super) struct LimitUsageRow {
     pub(super) window_id: String,
+    pub(super) account_id: Option<String>,
+    pub(super) plan_type: Option<String>,
+    pub(super) limit_id: Option<String>,
     pub(super) window: String,
     pub(super) window_minutes: i64,
     pub(super) window_start: Option<DateTime<Utc>>,

@@ -53,16 +53,14 @@ pub fn parse_rate_limit_line(
         return Vec::new();
     };
 
-    count_unknown_windows(rate_limits, diagnostics);
-
     let plan_type = string_field(rate_limits, "plan_type");
     let limit_id = string_field(rate_limits, "limit_id");
     let mut samples = Vec::new();
 
-    for window_name in ["primary", "secondary"] {
-        let Some(window_value) = rate_limits.get(window_name) else {
-            continue;
-        };
+    for (window_name, window_value) in rate_limit_window_entries(rate_limits) {
+        if !matches!(window_name, "primary" | "secondary") {
+            diagnostics.unknown_windows += 1;
+        }
         let Some(window) = window_value.as_object() else {
             diagnostics.invalid_window_minutes += 1;
             continue;
@@ -85,6 +83,31 @@ pub fn parse_rate_limit_line(
     }
     diagnostics.included_samples += samples.len() as i64;
     samples
+}
+
+fn rate_limit_window_entries(rate_limits: &Map<String, Value>) -> Vec<(&str, &Value)> {
+    let mut entries = rate_limits
+        .iter()
+        .filter(|(key, value)| {
+            !matches!(key.as_str(), "plan_type" | "limit_id")
+                && (matches!(key.as_str(), "primary" | "secondary") || value.is_object())
+        })
+        .map(|(key, value)| (key.as_str(), value))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| {
+        window_sort_key(left)
+            .cmp(&window_sort_key(right))
+            .then_with(|| left.cmp(right))
+    });
+    entries
+}
+
+fn window_sort_key(window_name: &str) -> u8 {
+    match window_name {
+        "primary" => 0,
+        "secondary" => 1,
+        _ => 2,
+    }
 }
 
 fn parse_window_sample(
@@ -130,23 +153,6 @@ fn parse_window_sample(
         resets_at,
         source: context.source.clone(),
     })
-}
-
-fn count_unknown_windows(
-    rate_limits: &Map<String, Value>,
-    diagnostics: &mut RateLimitParseDiagnostics,
-) {
-    for (key, value) in rate_limits {
-        if matches!(
-            key.as_str(),
-            "primary" | "secondary" | "plan_type" | "limit_id"
-        ) {
-            continue;
-        }
-        if value.is_object() {
-            diagnostics.unknown_windows += 1;
-        }
-    }
 }
 
 fn object_field<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a Map<String, Value>> {
@@ -351,6 +357,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_additional_window_objects_after_standard_windows() {
+        let line = json!({
+            "timestamp": "2026-05-12T13:05:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "rate_limits": {
+                    "burst": {
+                        "window_minutes": 60,
+                        "used_percent": 11.0,
+                        "resets_at": 1778605200
+                    },
+                    "primary": {
+                        "window_minutes": 300,
+                        "used_percent": 18.0,
+                        "resets_at": 1778605200
+                    },
+                    "secondary": {
+                        "window_minutes": 10080,
+                        "used_percent": 22.0,
+                        "resets_at": 1779206400
+                    },
+                    "plan_type": "team",
+                    "limit_id": "fixture-extra-window"
+                }
+            }
+        })
+        .to_string();
+        let mut diagnostics = RateLimitParseDiagnostics::default();
+
+        let samples = parse_rate_limit_line(&line, default_context(), &mut diagnostics);
+
+        assert_eq!(samples.len(), 3);
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.window.as_str())
+                .collect::<Vec<_>>(),
+            vec!["5h", "7d", "burst"]
+        );
+        assert_eq!(samples[2].window_minutes, 60);
+        assert_eq!(samples[2].limit_id.as_deref(), Some("fixture-extra-window"));
+        assert_eq!(diagnostics.unknown_windows, 1);
+        assert_eq!(diagnostics.missing_windows, 0);
+    }
+
+    #[test]
     fn null_rate_limits_are_counted_and_skipped() {
         let line = json!({
             "timestamp": "2026-05-12T12:10:00.000Z",
@@ -420,7 +472,6 @@ mod tests {
                         "resets_at": "not-reset"
                     },
                     "tertiary": {
-                        "window_minutes": 60,
                         "used_percent": 1.0,
                         "resets_at": 1778605200
                     }
@@ -433,7 +484,7 @@ mod tests {
         let samples = parse_rate_limit_line(&line, default_context(), &mut diagnostics);
 
         assert!(samples.is_empty());
-        assert_eq!(diagnostics.invalid_window_minutes, 1);
+        assert_eq!(diagnostics.invalid_window_minutes, 2);
         assert_eq!(diagnostics.invalid_used_percent, 1);
         assert_eq!(diagnostics.invalid_resets_at, 0);
         assert_eq!(diagnostics.unknown_windows, 1);

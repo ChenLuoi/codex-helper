@@ -11,8 +11,8 @@ pub use cli::{
     ResolvedStatRangeOptions, StatCommandOptions,
 };
 pub use reports::{
-    SkippedEvents, TokenUsage, UsageDiagnostics, UsageRecord, UsageRecordsReadOptions,
-    UsageRecordsReport,
+    SkippedEvents, TokenUsage, UsageDiagnostics, UsageRateLimit, UsageRecord,
+    UsageRecordsReadOptions, UsageRecordsReport,
 };
 
 use crate::error::AppError;

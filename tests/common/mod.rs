@@ -286,6 +286,9 @@ pub fn assert_limit_usage_row_schema(value: &Value, label: &str) {
         value,
         &[
             "windowId",
+            "accountId",
+            "planType",
+            "limitId",
             "window",
             "windowMinutes",
             "windowStart",
@@ -410,6 +413,9 @@ pub fn assert_limit_window_schema(value: &Value, label: &str) {
             "lastUsedPercent",
             "sampleCount",
             "resetKind",
+            "totalTokens",
+            "credits",
+            "usd",
         ],
         label,
     );
@@ -431,6 +437,9 @@ pub fn assert_limit_current_schema(value: &Value, label: &str) {
             "remainingPercent",
             "resetsAt",
             "resetInSeconds",
+            "totalTokens",
+            "credits",
+            "usd",
         ],
         label,
     );

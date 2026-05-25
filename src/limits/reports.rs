@@ -1,4 +1,7 @@
 use crate::error::AppError;
+use crate::format::{credits_to_usd, round_credits};
+use crate::pricing::{calculate_credit_cost, TokenUsage as PricingTokenUsage};
+use crate::stats::{UsageRateLimit, UsageRecord};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -105,6 +108,29 @@ impl RateLimitDiagnostics {
         self.invalid_resets_at += other.invalid_resets_at;
         self.out_of_range_percent += other.out_of_range_percent;
     }
+
+    pub(crate) fn merge_file_scan(&mut self, other: &RateLimitDiagnostics) {
+        self.read_lines += other.read_lines;
+        self.invalid_json_lines += other.invalid_json_lines;
+        self.rate_limit_events += other.rate_limit_events;
+        self.included_samples += other.included_samples;
+        self.null_rate_limits += other.null_rate_limits;
+        self.missing_rate_limits += other.missing_rate_limits;
+        self.missing_timestamps += other.missing_timestamps;
+        self.missing_windows += other.missing_windows;
+        self.unknown_windows += other.unknown_windows;
+        self.invalid_window_minutes += other.invalid_window_minutes;
+        self.invalid_used_percent += other.invalid_used_percent;
+        self.invalid_resets_at += other.invalid_resets_at;
+        self.out_of_range_percent += other.out_of_range_percent;
+        self.rate_limit_only_files += other.rate_limit_only_files;
+        self.account_mismatches += other.account_mismatches;
+        self.plan_mismatches += other.plan_mismatches;
+        self.window_mismatches += other.window_mismatches;
+        self.out_of_range_samples += other.out_of_range_samples;
+        self.fork_replay_lines_skipped += other.fork_replay_lines_skipped;
+        self.source_spans.extend(other.source_spans.iter().cloned());
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -206,6 +232,9 @@ pub struct LimitWindow {
     pub last_used_percent: f64,
     pub sample_count: i64,
     pub reset_kind: String,
+    pub total_tokens: i64,
+    pub credits: f64,
+    pub usd: f64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -256,6 +285,9 @@ pub struct LimitCurrentWindow {
     pub remaining_percent: Option<f64>,
     pub resets_at: Option<DateTime<Utc>>,
     pub reset_in_seconds: Option<i64>,
+    pub total_tokens: i64,
+    pub credits: f64,
+    pub usd: f64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -450,10 +482,8 @@ const RESET_KIND_CHANGED: &str = "changed";
 const CURRENT_STATUS_ACTIVE: &str = "active";
 const CURRENT_STATUS_EXPIRED: &str = "expired";
 const TREND_KIND_INCREASED: &str = "increased";
-const TREND_KIND_DECREASED: &str = "decreased";
 const TREND_KIND_RESET_CHANGED: &str = "resetChanged";
 const RESET_JITTER_TOLERANCE_SECONDS: i64 = 60;
-const TREND_USED_DECREASE_NOISE_PERCENT: f64 = 1.0;
 const INACTIVE_STREAM_MIN_SAMPLES: usize = 3;
 const INACTIVE_STREAM_MIN_SPAN_SECONDS: i64 = 60;
 const PERCENT_EPSILON: f64 = 0.000_001;
@@ -575,7 +605,219 @@ impl WindowAccumulator {
             last_used_percent: self.last_used_percent,
             sample_count: self.sample_count,
             reset_kind: self.reset_kind.to_string(),
+            total_tokens: 0,
+            credits: 0.0,
+            usd: 0.0,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WindowUsageTotals {
+    total_tokens: i64,
+    credits: f64,
+}
+
+#[derive(Clone)]
+struct UsageWindowTarget {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    account_id: Option<String>,
+    plan_type: Option<String>,
+    limit_id: Option<String>,
+    window_minutes: i64,
+    reset_at: DateTime<Utc>,
+}
+
+pub fn limit_windows_usage_range(
+    windows: &[LimitWindow],
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    usage_range(
+        windows
+            .iter()
+            .map(|window| (window.estimated_start, window.reset_at)),
+    )
+}
+
+pub fn limit_current_usage_range(
+    current: &[LimitCurrentWindow],
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    usage_range(current.iter().filter_map(limit_current_period))
+}
+
+pub fn attach_usage_to_limit_windows(windows: &mut [LimitWindow], records: &[UsageRecord]) {
+    let targets = windows
+        .iter()
+        .map(|window| UsageWindowTarget {
+            start: window.estimated_start,
+            end: window.reset_at,
+            account_id: window.account_id.clone(),
+            plan_type: window.plan_type.clone(),
+            limit_id: window.limit_id.clone(),
+            window_minutes: window.window_minutes,
+            reset_at: window.reset_at,
+        })
+        .collect::<Vec<_>>();
+    let totals = usage_totals_for_targets(records, &targets);
+
+    for (window, totals) in windows.iter_mut().zip(totals) {
+        window.total_tokens = totals.total_tokens;
+        window.credits = round_credits(totals.credits);
+        window.usd = credits_to_usd(totals.credits);
+    }
+}
+
+pub fn attach_usage_to_limit_current(current: &mut [LimitCurrentWindow], records: &[UsageRecord]) {
+    let targets = current
+        .iter()
+        .map(|row| {
+            limit_current_period(row).map(|(start, end)| UsageWindowTarget {
+                start,
+                end,
+                account_id: row.account_id.clone(),
+                plan_type: row.plan_type.clone(),
+                limit_id: row.limit_id.clone(),
+                window_minutes: row.window_minutes,
+                reset_at: end,
+            })
+        })
+        .collect::<Vec<_>>();
+    let concrete_targets = targets.iter().flatten().cloned().collect::<Vec<_>>();
+    let concrete_totals = usage_totals_for_targets(records, &concrete_targets);
+    let mut totals_iter = concrete_totals.into_iter();
+
+    for (row, target) in current.iter_mut().zip(targets) {
+        let Some(_) = target else {
+            continue;
+        };
+        let totals = totals_iter
+            .next()
+            .expect("current target and totals counts match");
+        row.total_tokens = totals.total_tokens;
+        row.credits = round_credits(totals.credits);
+        row.usd = credits_to_usd(totals.credits);
+    }
+}
+
+fn usage_range<I>(periods: I) -> Option<(DateTime<Utc>, DateTime<Utc>)>
+where
+    I: IntoIterator<Item = (DateTime<Utc>, DateTime<Utc>)>,
+{
+    let mut periods = periods.into_iter();
+    let (mut start, mut end) = periods.next()?;
+    for (period_start, period_end) in periods {
+        start = start.min(period_start);
+        end = end.max(period_end);
+    }
+    Some((start, end))
+}
+
+fn limit_current_period(row: &LimitCurrentWindow) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let reset_at = row.resets_at?;
+    let start = reset_at
+        .checked_sub_signed(Duration::minutes(row.window_minutes))
+        .unwrap_or(reset_at);
+    Some((start, reset_at))
+}
+
+fn usage_totals_for_targets(
+    records: &[UsageRecord],
+    targets: &[UsageWindowTarget],
+) -> Vec<WindowUsageTotals> {
+    let mut totals = vec![WindowUsageTotals::default(); targets.len()];
+    for record in records {
+        let cost = calculate_credit_cost(
+            &record.model,
+            PricingTokenUsage {
+                input_tokens: record.usage.input_tokens.max(0) as u64,
+                cached_input_tokens: record.usage.cached_input_tokens.max(0) as u64,
+                output_tokens: record.usage.output_tokens.max(0) as u64,
+            },
+        );
+        for target_index in usage_target_indexes_for_record(record, targets) {
+            let target_totals = totals
+                .get_mut(target_index)
+                .expect("target index is from targets");
+            target_totals.total_tokens += record.usage.total_tokens;
+            target_totals.credits += cost.credits;
+        }
+    }
+    totals
+}
+
+fn usage_target_indexes_for_record(
+    record: &UsageRecord,
+    targets: &[UsageWindowTarget],
+) -> Vec<usize> {
+    let time_account_matches = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| {
+            record.timestamp >= target.start
+                && record.timestamp < target.end
+                && usage_account_matches(target.account_id.as_deref(), record.account_id.as_deref())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    if !record.rate_limits.is_empty() {
+        let exact_matches = time_account_matches
+            .iter()
+            .copied()
+            .filter(|index| {
+                record
+                    .rate_limits
+                    .iter()
+                    .any(|rate_limit| usage_rate_limit_matches_target(rate_limit, &targets[*index]))
+            })
+            .collect::<Vec<_>>();
+        if !exact_matches.is_empty() {
+            return exact_matches;
+        }
+    }
+
+    non_ambiguous_legacy_target_indexes(&time_account_matches, targets)
+}
+
+fn non_ambiguous_legacy_target_indexes(
+    candidate_indexes: &[usize],
+    targets: &[UsageWindowTarget],
+) -> Vec<usize> {
+    let mut selected = Vec::new();
+    for index in candidate_indexes {
+        let target = &targets[*index];
+        let equivalent_candidates = candidate_indexes
+            .iter()
+            .filter(|candidate_index| {
+                let candidate = &targets[**candidate_index];
+                candidate.window_minutes == target.window_minutes
+                    && candidate.account_id == target.account_id
+                    && candidate.plan_type == target.plan_type
+            })
+            .count();
+        if equivalent_candidates == 1 {
+            selected.push(*index);
+        }
+    }
+    selected
+}
+
+fn usage_rate_limit_matches_target(
+    rate_limit: &UsageRateLimit,
+    target: &UsageWindowTarget,
+) -> bool {
+    rate_limit.window_minutes == target.window_minutes
+        && is_reset_time_equal_within_jitter(rate_limit.resets_at, target.reset_at)
+        && rate_limit.plan_type.as_deref() == target.plan_type.as_deref()
+        && rate_limit.limit_id.as_deref() == target.limit_id.as_deref()
+}
+
+fn usage_account_matches(window_account_id: Option<&str>, record_account_id: Option<&str>) -> bool {
+    match record_account_id {
+        Some(account_id) => {
+            window_account_id.is_none_or(|window_account| window_account == account_id)
+        }
+        None => window_account_id.is_none(),
     }
 }
 
@@ -896,6 +1138,9 @@ fn limit_current_from_window(window: &LimitWindow, now: DateTime<Utc>) -> LimitC
         remaining_percent: Some(100.0 - window.last_used_percent),
         resets_at: Some(window.reset_at),
         reset_in_seconds: active.then_some((window.reset_at - now).num_seconds()),
+        total_tokens: window.total_tokens,
+        credits: window.credits,
+        usd: window.usd,
     }
 }
 
@@ -1158,25 +1403,13 @@ fn trend_window_change_kind(
     next: &RateLimitSample,
 ) -> Option<&'static str> {
     let used_delta = next.used_percent - previous.used_percent;
-    if used_delta > PERCENT_EPSILON {
-        Some(TREND_KIND_INCREASED)
-    } else if used_delta < -PERCENT_EPSILON {
-        if is_reset_jitter_change(previous, next)
-            || used_delta.abs() <= TREND_USED_DECREASE_NOISE_PERCENT + PERCENT_EPSILON
-        {
-            None
-        } else {
-            Some(TREND_KIND_DECREASED)
-        }
-    } else if is_significant_reset_change(previous, next) {
+    if is_significant_reset_change(previous, next) {
         Some(TREND_KIND_RESET_CHANGED)
+    } else if used_delta > PERCENT_EPSILON {
+        Some(TREND_KIND_INCREASED)
     } else {
         None
     }
-}
-
-fn is_reset_jitter_change(previous: &RateLimitSample, next: &RateLimitSample) -> bool {
-    previous.resets_at != next.resets_at && is_reset_equal_for_trend(previous, next)
 }
 
 fn is_active_trend_sample(sample: &RateLimitSample) -> bool {
@@ -1595,7 +1828,7 @@ mod tests {
         let report = build_limit_trend_report(&input, Some(300), LimitReportOptions::default());
 
         assert_eq!(report.status, "ok");
-        assert_eq!(report.changes.len(), 4);
+        assert_eq!(report.changes.len(), 3);
         assert!(report
             .changes
             .iter()
@@ -1610,13 +1843,10 @@ mod tests {
         assert_eq!(report.changes[1].kind, TREND_KIND_INCREASED);
         assert_eq!(report.changes[1].used_percent, 25.0);
         assert_eq!(report.changes[1].delta_used_percent, Some(5.0));
-        assert_eq!(report.changes[2].kind, TREND_KIND_DECREASED);
+        assert_eq!(report.changes[2].kind, TREND_KIND_RESET_CHANGED);
         assert_eq!(report.changes[2].used_percent, 15.0);
         assert_eq!(report.changes[2].delta_used_percent, Some(-10.0));
-        assert_eq!(report.changes[3].kind, TREND_KIND_RESET_CHANGED);
-        assert_eq!(report.changes[3].used_percent, 15.0);
-        assert_eq!(report.changes[3].delta_used_percent, Some(0.0));
-        assert_eq!(report.changes[3].resets_at, utc_time(2026, 5, 12, 18, 0));
+        assert_eq!(report.changes[2].resets_at, utc_time(2026, 5, 12, 18, 0));
         assert!(report
             .changes
             .iter()
@@ -1658,7 +1888,7 @@ mod tests {
         assert!(report
             .changes
             .iter()
-            .all(|change| change.kind != TREND_KIND_DECREASED));
+            .all(|change| change.kind != "decreased"));
         assert!(report
             .changes
             .iter()
@@ -1812,6 +2042,35 @@ mod tests {
                 .duplicate_samples,
             1
         );
+    }
+
+    #[test]
+    fn usage_attachment_prefers_same_line_rate_limit_identity() {
+        let reset_at = utc_time(2026, 5, 19, 0, 0);
+        let mut windows = vec![
+            usage_window("limit-alpha", reset_at),
+            usage_window("limit-beta", reset_at),
+        ];
+        let records = vec![usage_record_with_rate_limit("limit-beta", reset_at)];
+
+        attach_usage_to_limit_windows(&mut windows, &records);
+
+        assert_eq!(windows[0].total_tokens, 0);
+        assert_eq!(windows[1].total_tokens, 42);
+    }
+
+    #[test]
+    fn usage_attachment_skips_ambiguous_legacy_records() {
+        let reset_at = utc_time(2026, 5, 19, 0, 0);
+        let mut windows = vec![
+            usage_window("limit-alpha", reset_at),
+            usage_window("limit-beta", reset_at),
+        ];
+        let records = vec![usage_record_without_rate_limits()];
+
+        attach_usage_to_limit_windows(&mut windows, &records);
+
+        assert!(windows.iter().all(|window| window.total_tokens == 0));
     }
 
     #[test]
@@ -2057,6 +2316,61 @@ mod tests {
                 path: format!("/tmp/{source}.jsonl"),
                 line_number: source_line,
             }),
+        }
+    }
+
+    fn usage_window(limit_id: &str, reset_at: DateTime<Utc>) -> LimitWindow {
+        LimitWindow {
+            id: format!("{limit_id}-window"),
+            account_id: Some("account-fixture".to_string()),
+            plan_type: Some("pro".to_string()),
+            limit_id: Some(limit_id.to_string()),
+            window: "7d".to_string(),
+            window_minutes: 10_080,
+            estimated_start: utc_time(2026, 5, 12, 0, 0),
+            reset_at,
+            first_seen: utc_time(2026, 5, 12, 0, 0),
+            last_seen: utc_time(2026, 5, 12, 0, 1),
+            min_used_percent: 1.0,
+            max_used_percent: 1.0,
+            last_used_percent: 1.0,
+            sample_count: 1,
+            reset_kind: RESET_KIND_FIRST_OBSERVED.to_string(),
+            total_tokens: 0,
+            credits: 0.0,
+            usd: 0.0,
+        }
+    }
+
+    fn usage_record_with_rate_limit(limit_id: &str, reset_at: DateTime<Utc>) -> UsageRecord {
+        let mut record = usage_record_without_rate_limits();
+        record.rate_limits = vec![UsageRateLimit {
+            plan_type: Some("pro".to_string()),
+            limit_id: Some(limit_id.to_string()),
+            window: "7d".to_string(),
+            window_minutes: 10_080,
+            resets_at: reset_at + Duration::seconds(1),
+        }];
+        record
+    }
+
+    fn usage_record_without_rate_limits() -> UsageRecord {
+        UsageRecord {
+            timestamp: utc_time(2026, 5, 12, 0, 30),
+            session_id: "usage-session".to_string(),
+            model: "gpt-5.5".to_string(),
+            reasoning_effort: None,
+            cwd: "/workspace/usage".to_string(),
+            account_id: Some("account-fixture".to_string()),
+            file_path: "/tmp/usage.jsonl".to_string(),
+            rate_limits: Vec::new(),
+            usage: crate::stats::TokenUsage {
+                input_tokens: 40,
+                cached_input_tokens: 0,
+                output_tokens: 2,
+                reasoning_output_tokens: 0,
+                total_tokens: 42,
+            },
         }
     }
 

@@ -287,6 +287,9 @@ Human-readable and CSV time fields are displayed in the local timezone; JSON
 timestamps remain RFC 3339 UTC values. It does not infer absolute quota units.
 Except for `limit current`, limit subcommands default to the 7-day window.
 Use `--window 5h` to inspect the 5-hour window.
+`limit current` and `limit windows` join each displayed reset cycle with local
+token-count records and append actual total token, credit, and USD usage for
+that cycle without treating those values as the server quota size.
 `limit current` always reads the last 7 days and does not accept `--start`,
 `--end`, or `--last`. Other limit commands read the last 30 days of local
 session data by default when no explicit `--start`, `--end`, or `--last` is
@@ -354,8 +357,8 @@ Limit commands:
 
 | Command | Output |
 | --- | --- |
-| `codex-ops limit current` | Current-cycle snapshot from the fixed 7-day lookback; each partition shows its latest logical cycle, marked active or expired. |
-| `codex-ops limit windows` | Observed server windows inferred from sample reset times; quota window defaults to `7d`; JSON includes `id`, non-JSON output omits it. |
+| `codex-ops limit current` | Current-cycle snapshot from the fixed 7-day lookback; each partition shows its latest logical cycle, marked active or expired, plus token/credit/USD usage for that cycle. |
+| `codex-ops limit windows` | Observed server windows inferred from sample reset times, with token/credit/USD usage for each window; quota window defaults to `7d`; JSON includes `id`, non-JSON output omits it. |
 | `codex-ops limit trend` | Used-percent change timeline for one selected quota window; quota window defaults to `7d`. |
 | `codex-ops limit resets` | Reset events for one selected quota window, including early reset detection; quota window defaults to `7d`. |
 | `codex-ops limit samples` | Raw rate-limit samples after filters; quota window defaults to `7d`. |
