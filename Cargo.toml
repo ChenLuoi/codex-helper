@@ -11,6 +11,7 @@ keywords = ["codex", "cli", "usage"]
 categories = ["command-line-utilities"]
 publish = ["crates-io"]
 exclude = [
+    ".agents/**",
     ".github/**",
     ".gitignore",
     ".ignore",
