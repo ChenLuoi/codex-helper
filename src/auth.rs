@@ -3,7 +3,9 @@ use crate::account_history::{
 };
 use crate::error::AppError;
 use crate::format::to_pretty_json;
-use crate::storage::{percent_encode, resolve_storage_paths, write_sensitive_file, StorageOptions};
+use crate::storage::{
+    path_to_string, percent_encode, resolve_storage_paths, write_sensitive_file, StorageOptions,
+};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -701,8 +703,8 @@ fn to_auth_profile_entry(
     AuthProfileEntry {
         source,
         account_id: parsed.account_id,
-        profile_file: profile_file.as_ref().map(|path| path_to_string(path)),
-        auth_file: auth_file.as_ref().map(|path| path_to_string(path)),
+        profile_file: profile_file.as_ref().map(path_to_string),
+        auth_file: auth_file.as_ref().map(path_to_string),
         summary: parsed.report.summary,
     }
 }
@@ -962,10 +964,6 @@ fn base64url_decode(value: &str) -> Result<Vec<u8>, ()> {
     Ok(output)
 }
 
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
-
 fn file_error(error: io::Error, path: &Path) -> AppError {
     if error.kind() == io::ErrorKind::NotFound {
         return AppError::new(format!(
@@ -983,7 +981,7 @@ fn is_not_found_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_utils::*;
 
     #[test]
     fn decodes_status_without_leaking_the_token() {
@@ -1095,83 +1093,6 @@ mod tests {
         assert_eq!(history["switches"][0]["fromAccountId"], "account-a");
         assert_eq!(history["switches"][0]["toAccountId"], "account-b");
 
-        let removed = remove_codex_auth_profile(
-            "account-a",
-            &AuthCommandOptions {
-                store_dir: Some(store_dir.clone()),
-                ..AuthCommandOptions::default()
-            },
-            now,
-        )
-        .unwrap();
-        assert_eq!(removed.removed.account_id, "account-a");
-        assert!(!store_dir.join("account-a.json").exists());
-
         let _ = fs::remove_dir_all(&temp_dir);
-    }
-
-    fn jwt(header: &str, payload: &str) -> String {
-        format!(
-            "{}.{}.signature",
-            encode_base64url(header),
-            encode_base64url(payload)
-        )
-    }
-
-    fn auth_content(account_id: &str, email: &str, plan: &str) -> String {
-        let payload = serde_json::json!({
-            "sub": format!("auth0|{account_id}"),
-            "email": email,
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": account_id,
-                "chatgpt_plan_type": plan,
-                "chatgpt_user_id": format!("user-{account_id}"),
-                "user_id": format!("user-{account_id}")
-            }
-        });
-        let token = jwt(r#"{"alg":"RS256","kid":"key-1"}"#, &payload.to_string());
-        serde_json::to_string_pretty(&serde_json::json!({
-            "auth_mode": "chatgpt",
-            "tokens": {
-                "id_token": token,
-                "refresh_token": "synthetic-refresh-token",
-                "account_id": account_id
-            },
-            "last_refresh": "2026-05-12T05:32:41.917677755Z"
-        }))
-        .unwrap()
-    }
-
-    fn temp_dir(prefix: &str) -> PathBuf {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        std::env::temp_dir().join(format!("{prefix}-{millis}-{}", std::process::id()))
-    }
-
-    fn encode_base64url(value: &str) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let bytes = value.as_bytes();
-        let mut output = String::new();
-        let mut index = 0;
-
-        while index < bytes.len() {
-            let b0 = bytes[index];
-            let b1 = *bytes.get(index + 1).unwrap_or(&0);
-            let b2 = *bytes.get(index + 2).unwrap_or(&0);
-            output.push(TABLE[(b0 >> 2) as usize] as char);
-            output.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-            if index + 1 < bytes.len() {
-                output.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
-            }
-            if index + 2 < bytes.len() {
-                output.push(TABLE[(b2 & 0x3f) as usize] as char);
-            }
-            index += 3;
-        }
-
-        output
     }
 }

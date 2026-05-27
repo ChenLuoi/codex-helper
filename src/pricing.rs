@@ -9,21 +9,29 @@ pub struct TokenUsage {
     pub output_tokens: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
-    pub key: &'static str,
-    pub label: &'static str,
+    pub key: String,
+    pub label: String,
     pub input_credits_per_million: f64,
     pub cached_input_credits_per_million: f64,
     pub output_credits_per_million: f64,
-    pub note: Option<&'static str>,
+    pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnownUnpricedModel {
+    pub key: String,
+    pub label: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RateCardSource {
-    pub name: &'static str,
-    pub checked_at: &'static str,
-    pub credit_to_usd: &'static str,
+    pub name: String,
+    pub checked_at: String,
+    pub credit_to_usd: String,
+    pub credits_per_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,18 +48,23 @@ pub struct CreditCost {
 const RATE_CARD_JSON: &str = include_str!("../data/codex-rate-card.json");
 
 static RATE_CARD: LazyLock<RateCard> = LazyLock::new(load_rate_card);
-pub static CODEX_RATE_CARD_SOURCE: LazyLock<RateCardSource> = LazyLock::new(|| rate_card().source);
+pub static CODEX_RATE_CARD_SOURCE: LazyLock<RateCardSource> =
+    LazyLock::new(|| rate_card().source.clone());
 
 #[derive(Debug, Clone)]
 struct RateCard {
     source: RateCardSource,
     models: Vec<ModelPricing>,
+    known_unpriced: Vec<KnownUnpricedModel>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawRateCard {
     source: RawRateCardSource,
     models: Vec<RawModelPricing>,
+    #[serde(default)]
+    #[serde(rename = "knownUnpriced")]
+    known_unpriced: Vec<RawKnownUnpricedModel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +81,13 @@ struct RawModelPricing {
     input_credits_per_million: f64,
     cached_input_credits_per_million: f64,
     output_credits_per_million: f64,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawKnownUnpricedModel {
+    key: String,
+    label: String,
     note: Option<String>,
 }
 
@@ -107,18 +127,20 @@ pub fn get_model_pricing(model: &str) -> Option<ModelPricing> {
     rate_card()
         .models
         .iter()
-        .copied()
         .find(|pricing| pricing.key == key)
+        .cloned()
 }
 
 pub fn list_model_pricing() -> Vec<ModelPricing> {
     let mut pricing = rate_card().models.clone();
-    pricing.sort_by(|left, right| left.key.cmp(right.key));
+    pricing.sort_by(|left, right| left.key.cmp(&right.key));
     pricing
 }
 
-pub fn list_known_unpriced_models() -> Vec<ModelPricing> {
-    Vec::new()
+pub fn list_known_unpriced_models() -> Vec<KnownUnpricedModel> {
+    let mut pricing = rate_card().known_unpriced.clone();
+    pricing.sort_by(|left, right| left.key.cmp(&right.key));
+    pricing
 }
 
 pub fn calculate_credit_cost(model: &str, usage: TokenUsage) -> CreditCost {
@@ -156,30 +178,66 @@ fn rate_card() -> &'static RateCard {
 }
 
 fn load_rate_card() -> RateCard {
-    let raw: RawRateCard = serde_json::from_str(RATE_CARD_JSON).unwrap_or_else(|error| {
+    load_rate_card_from_str(RATE_CARD_JSON)
+}
+
+fn load_rate_card_from_str(content: &str) -> RateCard {
+    let raw: RawRateCard = serde_json::from_str(content).unwrap_or_else(|error| {
         panic!("Failed to parse data/codex-rate-card.json: {error}");
     });
     validate_rate_card(&raw);
+    let credits_per_usd = parse_credits_per_usd(&raw.source.credit_to_usd);
 
     RateCard {
         source: RateCardSource {
-            name: leak_str(raw.source.name),
-            checked_at: leak_str(raw.source.checked_at),
-            credit_to_usd: leak_str(raw.source.credit_to_usd),
+            name: raw.source.name,
+            checked_at: raw.source.checked_at,
+            credit_to_usd: raw.source.credit_to_usd,
+            credits_per_usd,
         },
-        models: raw
-            .models
-            .into_iter()
-            .map(|model| ModelPricing {
-                key: leak_str(model.key),
-                label: leak_str(model.label),
-                input_credits_per_million: model.input_credits_per_million,
-                cached_input_credits_per_million: model.cached_input_credits_per_million,
-                output_credits_per_million: model.output_credits_per_million,
-                note: model.note.map(leak_str),
-            })
-            .collect(),
+        models: convert_models(raw.models),
+        known_unpriced: convert_known_unpriced_models(raw.known_unpriced),
     }
+}
+
+fn convert_models(raw: Vec<RawModelPricing>) -> Vec<ModelPricing> {
+    raw.into_iter()
+        .map(|model| ModelPricing {
+            key: model.key,
+            label: model.label,
+            input_credits_per_million: model.input_credits_per_million,
+            cached_input_credits_per_million: model.cached_input_credits_per_million,
+            output_credits_per_million: model.output_credits_per_million,
+            note: model.note,
+        })
+        .collect()
+}
+
+fn convert_known_unpriced_models(raw: Vec<RawKnownUnpricedModel>) -> Vec<KnownUnpricedModel> {
+    raw.into_iter()
+        .map(|model| KnownUnpricedModel {
+            key: model.key,
+            label: model.label,
+            note: model.note,
+        })
+        .collect()
+}
+
+fn parse_credits_per_usd(value: &str) -> f64 {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 4 || parts[1] != "credits" || parts[2] != "=" || parts[3] != "$1" {
+        panic!("data/codex-rate-card.json credit_to_usd must match 'N credits = $1': {value:?}");
+    }
+
+    let credits = parts[0].parse::<f64>().unwrap_or_else(|_| {
+        panic!("data/codex-rate-card.json credit_to_usd must start with a number: {value:?}");
+    });
+    if !credits.is_finite() || credits <= 0.0 {
+        panic!(
+            "data/codex-rate-card.json credit_to_usd must use a positive finite rate: {value:?}"
+        );
+    }
+    credits
 }
 
 fn validate_rate_card(raw: &RawRateCard) {
@@ -214,6 +272,24 @@ fn validate_rate_card(raw: &RawRateCard) {
             "models[].output_credits_per_million",
         );
     }
+
+    let mut known_unpriced_keys = HashSet::new();
+    for model in &raw.known_unpriced {
+        assert_non_empty(&model.key, "knownUnpriced[].key");
+        assert_non_empty(&model.label, "knownUnpriced[].label");
+        if keys.contains(model.key.as_str()) {
+            panic!(
+                "data/codex-rate-card.json known unpriced model duplicates priced model key: {}",
+                model.key
+            );
+        }
+        if !known_unpriced_keys.insert(model.key.as_str()) {
+            panic!(
+                "data/codex-rate-card.json has duplicate known unpriced model key: {}",
+                model.key
+            );
+        }
+    }
 }
 
 fn assert_non_empty(value: &str, path: &str) {
@@ -226,10 +302,6 @@ fn assert_non_negative_finite(value: f64, path: &str) {
     if !value.is_finite() || value < 0.0 {
         panic!("data/codex-rate-card.json field {path} must be finite and non-negative");
     }
-}
-
-fn leak_str(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
 }
 
 #[cfg(test)]
@@ -308,8 +380,8 @@ mod tests {
             .map(|pricing| pricing.key)
             .collect::<Vec<_>>();
 
-        assert_eq!(keys.first(), Some(&"gpt-5.2"));
-        assert!(keys.contains(&"gpt-5.5"));
+        assert_eq!(keys.first().map(String::as_str), Some("gpt-5.2"));
+        assert!(keys.iter().any(|k| k == "gpt-5.5"));
     }
 
     #[test]
@@ -320,6 +392,51 @@ mod tests {
         );
         assert_eq!(CODEX_RATE_CARD_SOURCE.checked_at, "2026-05-13");
         assert_eq!(CODEX_RATE_CARD_SOURCE.credit_to_usd, "25 credits = $1");
+        assert!((CODEX_RATE_CARD_SOURCE.credits_per_usd - 25.0).abs() < f64::EPSILON);
         assert_eq!(list_model_pricing().len(), 8);
+        assert!(list_known_unpriced_models().is_empty());
+    }
+
+    #[test]
+    fn known_unpriced_models_do_not_require_price_fields() {
+        let rate_card = load_rate_card_from_str(
+            r#"{
+                "source": {
+                    "name": "test",
+                    "checked_at": "2026-05-27",
+                    "credit_to_usd": "50 credits = $1"
+                },
+                "models": [
+                    {
+                        "key": "priced-model",
+                        "label": "Priced Model",
+                        "input_credits_per_million": 1.0,
+                        "cached_input_credits_per_million": 0.5,
+                        "output_credits_per_million": 2.0
+                    }
+                ],
+                "knownUnpriced": [
+                    {
+                        "key": "future-model",
+                        "label": "Future Model",
+                        "note": "not yet priced"
+                    }
+                ]
+            }"#,
+        );
+
+        assert_eq!(rate_card.source.credits_per_usd, 50.0);
+        assert_eq!(rate_card.known_unpriced.len(), 1);
+        assert_eq!(rate_card.known_unpriced[0].key, "future-model");
+        assert_eq!(
+            rate_card.known_unpriced[0].note.as_deref(),
+            Some("not yet priced")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "credit_to_usd must match")]
+    fn invalid_credit_exchange_rate_format_is_rejected() {
+        parse_credits_per_usd("25 = $1");
     }
 }

@@ -18,7 +18,9 @@ use crate::limits::{
     build_limit_windows_report, read_rate_limit_samples_report, LimitReportOptions,
     LimitWindowSelector, RateLimitSamplesReadOptions,
 };
-use crate::storage::{path_to_string, resolve_storage_paths, StorageOptions};
+use crate::storage::{
+    normalize_optional_string, path_to_string, resolve_storage_paths, StorageOptions,
+};
 use crate::time::{self, RawRangeOptions, StatGroupBy};
 use chrono::{DateTime, Duration, Utc};
 use std::path::PathBuf;
@@ -262,7 +264,7 @@ fn resolve_stat_options(
         account_history_file: raw.account_history_file.clone(),
         sessions_dir: raw.sessions_dir.clone(),
     });
-    let account_id = normalize_optional_account_id(raw.account_id.as_deref());
+    let account_id = normalize_optional_string(raw.account_id.as_deref());
     let needs_required_account_history = account_id.is_some() || group_by == StatGroupBy::Account;
     let account_history = if needs_required_account_history {
         Some(ensure_usage_account_history(
@@ -392,15 +394,6 @@ fn read_usage_session_detail(
     );
     let (accumulator, diagnostics) = process_usage_records_parallel(options, accumulator)?;
     Ok(accumulator.finish(Some(diagnostics)))
-}
-
-fn normalize_optional_account_id(value: Option<&str>) -> Option<String> {
-    let normalized = value?.trim();
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized.to_string())
-    }
 }
 
 fn parse_positive_usize(value: &str, name: &str) -> Result<usize, AppError> {
