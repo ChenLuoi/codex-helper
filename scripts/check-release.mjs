@@ -71,6 +71,7 @@ assertCargoPackageIncludes(cargoPackageFiles, [
   "src/lib.rs"
 ]);
 assertCargoPackageExcludes(cargoPackageFiles, [
+  ".agents/",
   ".github/",
   ".gitignore",
   ".ignore",
