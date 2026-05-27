@@ -12,7 +12,7 @@ use super::{
 use crate::auth::{ensure_usage_account_history, AuthCommandOptions};
 use crate::error::AppError;
 use crate::stats::{read_usage_records_report, UsageRecord, UsageRecordsReadOptions};
-use crate::storage::{resolve_storage_paths, StorageOptions};
+use crate::storage::{normalize_optional_string, resolve_storage_paths, StorageOptions};
 use crate::time::{self, DateBound, RawRangeOptions};
 use chrono::{DateTime, Duration, Utc};
 use std::path::PathBuf;
@@ -257,15 +257,6 @@ fn resolve_limit_date_range(
         },
         now,
     )
-}
-
-fn normalize_optional_string(value: Option<&str>) -> Option<String> {
-    let value = value?.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
 }
 
 #[cfg(test)]

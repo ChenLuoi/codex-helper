@@ -1,3 +1,4 @@
+use crate::pricing::CODEX_RATE_CARD_SOURCE;
 use serde::Serialize;
 
 pub fn to_pretty_json<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
@@ -13,7 +14,8 @@ pub fn round_credits(value: f64) -> f64 {
 }
 
 pub fn credits_to_usd(credits: f64) -> f64 {
-    (((credits / 25.0) + f64::EPSILON) * 1_000_000.0).round() / 1_000_000.0
+    (((credits / CODEX_RATE_CARD_SOURCE.credits_per_usd) + f64::EPSILON) * 1_000_000.0).round()
+        / 1_000_000.0
 }
 
 pub fn format_credits(value: f64) -> String {

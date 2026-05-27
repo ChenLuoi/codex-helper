@@ -542,7 +542,12 @@ pub(super) fn to_usage_stats_json(report: &UsageStatsReport) -> UsageStatsJson<'
         rows: &report.rows,
         totals: &report.totals,
         unpriced_models: &report.unpriced_models,
-        warnings: usage_warnings(report.start, report.end, report.diagnostics.as_ref()),
+        warnings: usage_warnings(
+            report.start,
+            report.end,
+            report.diagnostics.as_ref(),
+            &report.unpriced_models,
+        ),
         diagnostics: report.diagnostics.as_ref(),
     }
 }
@@ -576,7 +581,12 @@ pub(super) fn to_usage_sessions_json(report: &UsageSessionsReport) -> UsageSessi
         rows: report.rows.iter().map(to_session_row_json).collect(),
         totals: &report.totals,
         unpriced_models: &report.unpriced_models,
-        warnings: usage_warnings(report.start, report.end, report.diagnostics.as_ref()),
+        warnings: usage_warnings(
+            report.start,
+            report.end,
+            report.diagnostics.as_ref(),
+            &report.unpriced_models,
+        ),
         diagnostics: report.diagnostics.as_ref(),
     }
 }
@@ -600,7 +610,12 @@ pub(super) fn to_usage_session_detail_json(
         reasoning_effort_switches: report.reasoning_effort_switches,
         totals: &report.totals,
         unpriced_models: &report.unpriced_models,
-        warnings: usage_warnings(report.start, report.end, report.diagnostics.as_ref()),
+        warnings: usage_warnings(
+            report.start,
+            report.end,
+            report.diagnostics.as_ref(),
+            &report.unpriced_models,
+        ),
         diagnostics: report.diagnostics.as_ref(),
     }
 }
@@ -639,9 +654,76 @@ fn to_session_event_row_json(row: &UsageSessionEventRow) -> UsageSessionEventRow
 pub(super) fn usage_warnings(
     _start: DateTime<Utc>,
     _end: DateTime<Utc>,
-    _diagnostics: Option<&UsageDiagnostics>,
+    diagnostics: Option<&UsageDiagnostics>,
+    unpriced_models: &[UsageUnpricedModelRow],
 ) -> Vec<String> {
-    Vec::new()
+    let mut warnings = Vec::new();
+
+    if let Some(diagnostics) = diagnostics {
+        if diagnostics.prefiltered_files > 0 && !diagnostics.scan_all_files {
+            warnings.push(format!(
+                "{} session file(s) were prefiltered and may contain usage events within the time range. Use --full-scan to include all files.",
+                diagnostics.prefiltered_files
+            ));
+        }
+
+        if diagnostics.skipped_events.missing_metadata > 0 {
+            warnings.push(format!(
+                "{} token count event(s) were skipped due to missing metadata.",
+                diagnostics.skipped_events.missing_metadata
+            ));
+        }
+
+        if diagnostics.skipped_events.missing_usage > 0 {
+            warnings.push(format!(
+                "{} token count event(s) were skipped due to missing usage data.",
+                diagnostics.skipped_events.missing_usage
+            ));
+        }
+
+        if diagnostics.skipped_events.out_of_range > 0 {
+            warnings.push(format!(
+                "{} token count event(s) were outside the requested time range.",
+                diagnostics.skipped_events.out_of_range
+            ));
+        }
+
+        if diagnostics.skipped_events.account_mismatch > 0 {
+            warnings.push(format!(
+                "{} token count event(s) were filtered by account mismatch.",
+                diagnostics.skipped_events.account_mismatch
+            ));
+        }
+
+        if diagnostics.skipped_events.fork_replay > 0 {
+            warnings.push(format!(
+                "{} token count event(s) were skipped as fork replay.",
+                diagnostics.skipped_events.fork_replay
+            ));
+        }
+
+        if diagnostics.invalid_json_lines > 0 {
+            warnings.push(format!(
+                "{} line(s) contained invalid JSON and were skipped.",
+                diagnostics.invalid_json_lines
+            ));
+        }
+    }
+
+    if !unpriced_models.is_empty() {
+        let total_unpriced_calls: i64 = unpriced_models.iter().map(|m| m.calls).sum();
+        let model_names = unpriced_models
+            .iter()
+            .map(|m| m.model.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        warnings.push(format!(
+            "{} call(s) with unpriced model(s): {model_names}",
+            total_unpriced_calls
+        ));
+    }
+
+    warnings
 }
 
 pub(super) fn limit_usage_warnings(report: &LimitUsageReport) -> Vec<String> {
@@ -694,4 +776,71 @@ pub(super) fn format_date_time(date: DateTime<Utc>) -> String {
 
 fn iso_string(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn usage_warnings_include_diagnostics_and_unpriced_models() {
+        let mut diagnostics = UsageDiagnostics::new(1, false);
+        diagnostics.prefiltered_files = 2;
+        diagnostics.skipped_events.missing_metadata = 1;
+        diagnostics.skipped_events.account_mismatch = 3;
+        diagnostics.invalid_json_lines = 4;
+        let unpriced_models = vec![UsageUnpricedModelRow {
+            model: "future-model".to_string(),
+            pricing_key: "future-model".to_string(),
+            calls: 5,
+            total_tokens: 100,
+            note: None,
+            pricing_stub: "{}".to_string(),
+        }];
+
+        let warnings = usage_warnings(
+            utc(2026, 5, 1),
+            utc(2026, 5, 2),
+            Some(&diagnostics),
+            &unpriced_models,
+        );
+
+        assert!(warnings.iter().any(|line| line.contains("--full-scan")));
+        assert!(warnings
+            .iter()
+            .any(|line| line.contains("missing metadata")));
+        assert!(warnings
+            .iter()
+            .any(|line| line.contains("account mismatch")));
+        assert!(warnings.iter().any(|line| line.contains("invalid JSON")));
+        assert!(warnings
+            .iter()
+            .any(|line| line.contains("5 call(s) with unpriced model(s): future-model")));
+    }
+
+    #[test]
+    fn usage_warnings_include_unpriced_models_without_diagnostics() {
+        let unpriced_models = vec![UsageUnpricedModelRow {
+            model: "future-model".to_string(),
+            pricing_key: "future-model".to_string(),
+            calls: 1,
+            total_tokens: 10,
+            note: None,
+            pricing_stub: "{}".to_string(),
+        }];
+
+        let warnings = usage_warnings(utc(2026, 5, 1), utc(2026, 5, 2), None, &unpriced_models);
+
+        assert_eq!(
+            warnings,
+            vec!["1 call(s) with unpriced model(s): future-model".to_string()]
+        );
+    }
+
+    fn utc(year: i32, month: u32, day: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, 0, 0, 0)
+            .single()
+            .expect("valid test time")
+    }
 }

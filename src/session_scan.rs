@@ -263,7 +263,6 @@ fn prepare_session_files(
     }
 
     let lookup_roots = file_lookup_roots(sessions_dir);
-    let mut fingerprint_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
     let mut parent_lookup_cache: HashMap<String, Option<PathBuf>> = HashMap::new();
 
     for item in &mut metadata {
@@ -290,11 +289,7 @@ fn prepare_session_files(
         };
 
         let child_path = item.path.clone();
-        let parent_fingerprints =
-            normalized_event_fingerprints_cached(&parent_path, &mut fingerprint_cache)?;
-        let child_fingerprints =
-            normalized_event_fingerprints_cached(&child_path, &mut fingerprint_cache)?;
-        let replay_lines = fork_replay_prefix_lines(&child_fingerprints, &parent_fingerprints);
+        let replay_lines = count_fork_replay_lines_streaming(&child_path, &parent_path)?;
 
         if replay_lines > 0 {
             diagnostics.fork_replay_lines += replay_lines.saturating_sub(1) as i64;
@@ -421,86 +416,108 @@ fn collect_rollout_files_by_session_id(
     Ok(())
 }
 
-fn normalized_event_fingerprints_cached(
-    path: &Path,
-    cache: &mut HashMap<PathBuf, Vec<String>>,
-) -> Result<Vec<String>, AppError> {
-    if !cache.contains_key(path) {
-        let fingerprints = read_normalized_event_fingerprints(path)?;
-        cache.insert(path.to_path_buf(), fingerprints);
-    }
-
-    cache
-        .get(path)
-        .cloned()
-        .ok_or_else(|| AppError::new("Failed to cache fork event fingerprints."))
-}
-
-fn read_normalized_event_fingerprints(path: &Path) -> Result<Vec<String>, AppError> {
-    let file = File::open(path).map_err(|error| AppError::new(error.to_string()))?;
-    let mut reader = BufReader::with_capacity(SESSION_READ_BUFFER_SIZE, file);
-    let mut line = String::new();
-    let mut fingerprints = Vec::new();
-
-    loop {
-        line.clear();
-        let bytes_read = reader
-            .read_line(&mut line)
-            .map_err(|error| AppError::new(error.to_string()))?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        fingerprints.push(normalized_event_fingerprint(&line));
-    }
-
-    Ok(fingerprints)
-}
-
-fn normalized_event_fingerprint(line: &str) -> String {
+fn normalized_event_fingerprint_into(line: &str, buffer: &mut String) {
+    buffer.clear();
     let Ok(mut value) = serde_json::from_str::<Value>(line) else {
-        return format!("invalid-json:{}", line.len());
+        buffer.push_str("invalid-json:");
+        buffer.push_str(&line.len().to_string());
+        return;
     };
 
     if let Value::Object(fields) = &mut value {
         fields.remove("timestamp");
     }
 
-    canonical_json(&value)
+    canonical_json(&value, buffer);
 }
 
-fn canonical_json(value: &Value) -> String {
+fn canonical_json(value: &Value, buffer: &mut String) {
     match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string()),
+        Value::Null => buffer.push_str("null"),
+        Value::Bool(value) => {
+            if *value {
+                buffer.push_str("true");
+            } else {
+                buffer.push_str("false");
+            }
+        }
+        Value::Number(value) => {
+            buffer.push_str(&value.to_string());
+        }
+        Value::String(value) => {
+            let serialized = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+            buffer.push_str(&serialized);
+        }
         Value::Array(values) => {
-            let values = values.iter().map(canonical_json).collect::<Vec<_>>();
-            format!("[{}]", values.join(","))
+            buffer.push('[');
+            for (i, element) in values.iter().enumerate() {
+                if i > 0 {
+                    buffer.push(',');
+                }
+                canonical_json(element, buffer);
+            }
+            buffer.push(']');
         }
         Value::Object(fields) => {
-            let mut entries = fields.iter().collect::<Vec<_>>();
+            let mut entries: Vec<(&String, &Value)> = fields.iter().collect();
             entries.sort_by(|left, right| left.0.cmp(right.0));
-            let entries = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-                    format!("{key}:{}", canonical_json(value))
-                })
-                .collect::<Vec<_>>();
-            format!("{{{}}}", entries.join(","))
+            buffer.push('{');
+            for (i, (key, value)) in entries.iter().enumerate() {
+                if i > 0 {
+                    buffer.push(',');
+                }
+                let serialized_key =
+                    serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+                buffer.push_str(&serialized_key);
+                buffer.push(':');
+                canonical_json(value, buffer);
+            }
+            buffer.push('}');
         }
     }
 }
 
-fn fork_replay_prefix_lines(child: &[String], parent: &[String]) -> usize {
-    if child.len() <= 1 || parent.is_empty() {
-        return 0;
+fn count_fork_replay_lines_streaming(
+    child_path: &Path,
+    parent_path: &Path,
+) -> Result<usize, AppError> {
+    let child_file = File::open(child_path).map_err(|error| AppError::new(error.to_string()))?;
+    let parent_file = File::open(parent_path).map_err(|error| AppError::new(error.to_string()))?;
+    let mut child_reader = BufReader::with_capacity(SESSION_READ_BUFFER_SIZE, child_file);
+    let mut parent_reader = BufReader::with_capacity(SESSION_READ_BUFFER_SIZE, parent_file);
+    let mut child_line = String::new();
+    let mut parent_line = String::new();
+    let mut child_fingerprint = String::new();
+    let mut parent_fingerprint = String::new();
+    let mut matched = 0;
+
+    if child_reader
+        .read_line(&mut child_line)
+        .map_err(|error| AppError::new(error.to_string()))?
+        == 0
+    {
+        return Ok(0);
     }
 
-    let mut matched = 0;
-    for (child_fingerprint, parent_fingerprint) in child[1..].iter().zip(parent) {
+    loop {
+        child_line.clear();
+        let child_bytes_read = child_reader
+            .read_line(&mut child_line)
+            .map_err(|error| AppError::new(error.to_string()))?;
+        if child_bytes_read == 0 {
+            break;
+        }
+
+        parent_line.clear();
+        let parent_bytes_read = parent_reader
+            .read_line(&mut parent_line)
+            .map_err(|error| AppError::new(error.to_string()))?;
+        if parent_bytes_read == 0 {
+            break;
+        }
+
+        normalized_event_fingerprint_into(&child_line, &mut child_fingerprint);
+        normalized_event_fingerprint_into(&parent_line, &mut parent_fingerprint);
         if child_fingerprint != parent_fingerprint {
             break;
         }
@@ -508,9 +525,9 @@ fn fork_replay_prefix_lines(child: &[String], parent: &[String]) -> usize {
     }
 
     if matched == 0 {
-        0
+        Ok(0)
     } else {
-        matched + 1
+        Ok(matched + 1)
     }
 }
 

@@ -122,6 +122,15 @@ pub fn path_to_string(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().to_string()
 }
 
+pub fn normalize_optional_string(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 fn temp_seed() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)

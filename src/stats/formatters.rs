@@ -433,7 +433,12 @@ fn append_usage_notes<T: UsageReportNotes>(lines: &mut Vec<String>, report: &T, 
         }
     }
 
-    let warnings = usage_warnings(report.start(), report.end(), report.diagnostics());
+    let warnings = usage_warnings(
+        report.start(),
+        report.end(),
+        report.diagnostics(),
+        report.unpriced_models(),
+    );
     if !warnings.is_empty() {
         lines.push(String::new());
         lines.extend(warnings);

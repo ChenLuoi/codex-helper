@@ -9,6 +9,7 @@ use std::path::Path;
 pub const ACCOUNT_HISTORY_STORE_VERSION: u8 = 1;
 pub const DEFAULT_ACCOUNT_SOURCE: &str = "auth.json";
 pub const AUTH_SELECT_SOURCE: &str = "auth select";
+const AUTH_REMOVE_SOURCE: &str = "auth remove";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +170,7 @@ pub fn usage_account_history_from_store(
     let switches = store
         .switches
         .into_iter()
+        .filter(|entry| entry.source == AUTH_SELECT_SOURCE)
         .map(|entry| {
             Ok(UsageAccountSwitch {
                 timestamp: parse_timestamp(&entry.timestamp, "switch.timestamp")?,
@@ -260,7 +262,7 @@ fn normalize_account_history_store(
             normalize_required_account_id(&entry.from_account_id, "switch from account id")?;
         entry.to_account_id =
             normalize_required_account_id(&entry.to_account_id, "switch to account id")?;
-        if entry.source != AUTH_SELECT_SOURCE {
+        if entry.source != AUTH_SELECT_SOURCE && entry.source != AUTH_REMOVE_SOURCE {
             return Err(AppError::new("Expected switch.source to be auth select."));
         }
     }
@@ -311,8 +313,7 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_utils::*;
 
     #[test]
     fn missing_and_empty_history_files_read_as_empty_store() {
@@ -379,6 +380,29 @@ mod tests {
     }
 
     #[test]
+    fn legacy_auth_remove_switches_do_not_affect_usage_attribution() {
+        let store = normalize_account_history_store(AccountHistoryStore {
+            version: ACCOUNT_HISTORY_STORE_VERSION,
+            default_account: Some(account("account-a", "2026-05-01T00:00:00.000Z")),
+            switches: vec![AccountHistorySwitchEvent {
+                timestamp: "2026-05-02T00:00:00.000Z".to_string(),
+                from_account_id: "account-b".to_string(),
+                to_account_id: "account-c".to_string(),
+                source: AUTH_REMOVE_SOURCE.to_string(),
+            }],
+        })
+        .expect("normalize");
+        let usage = usage_account_history_from_store(store)
+            .expect("usage history")
+            .expect("non-empty usage history");
+
+        assert_eq!(
+            usage.account_id_at(parse("2026-05-02T12:00:00.000Z")),
+            Some("account-a".to_string())
+        );
+    }
+
+    #[test]
     fn ensure_default_account_initializes_and_writes_store() {
         let root = temp_dir("codex-ops-account-history-ensure");
         fs::create_dir_all(&root).expect("create root");
@@ -423,13 +447,5 @@ mod tests {
         DateTime::parse_from_rfc3339(value)
             .expect("timestamp")
             .with_timezone(&Utc)
-    }
-
-    fn temp_dir(prefix: &str) -> PathBuf {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_millis();
-        std::env::temp_dir().join(format!("{prefix}-{millis}-{}", std::process::id()))
     }
 }

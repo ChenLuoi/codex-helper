@@ -7,7 +7,7 @@ use crate::pricing::{
     TokenUsage as PricingTokenUsage, CODEX_RATE_CARD_SOURCE,
 };
 use crate::stats::{read_usage_records_report, UsageRecordsReadOptions};
-use crate::storage::{resolve_storage_paths, StorageOptions};
+use crate::storage::{path_to_string, resolve_storage_paths, StorageOptions};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -495,7 +495,7 @@ fn check_pricing() -> DoctorCheck {
         details.push(format!(
             "{}: {}",
             model.label,
-            model.note.unwrap_or_default()
+            model.note.as_deref().unwrap_or_default()
         ));
     }
 
@@ -629,10 +629,6 @@ fn is_readonly(path: &Path) -> bool {
 
 fn format_iso(date: DateTime<Utc>) -> String {
     date.to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
 }
 
 #[cfg(test)]
