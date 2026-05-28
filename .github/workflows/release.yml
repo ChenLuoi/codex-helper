@@ -268,6 +268,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          release_title="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$tag" \
+              -f target_commitish="${GITHUB_SHA}" \
+              --jq .name
+          )"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$tag" \
+            -f target_commitish="${GITHUB_SHA}" \
+            --jq .body >"$notes_file"
 
           if gh release view "$tag" >/dev/null 2>&1; then
             is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
@@ -276,8 +287,9 @@ jobs:
               exit 1
             fi
             echo "Draft release ${tag} already exists; uploading assets to it."
+            gh release edit "$tag" --title "$release_title" --notes-file "$notes_file"
           else
-            gh release create "$tag" --draft --title "$tag" --notes "Release $tag"
+            gh release create "$tag" --draft --verify-tag --title "$release_title" --notes-file "$notes_file"
           fi
 
           gh release upload "$tag" dist/release-assets/* --clobber
@@ -370,15 +382,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          release_id="$(
-            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              --jq ".[] | select(.tag_name == \"${tag}\") | .id" \
-              | head -n 1
-          )"
-
-          if [ -z "$release_id" ]; then
+          if ! gh release view "$tag" >/dev/null 2>&1; then
             echo "::error::Unable to find GitHub Release for ${tag}"
             exit 1
           fi
 
-          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -f draft=false -f make_latest=true
+          gh release edit "$tag" --draft=false
+          gh release edit "$tag" --latest
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [ "$latest_tag" != "$tag" ]; then
+            echo "::error::Expected ${tag} to be latest release, but GitHub reports ${latest_tag}"
+            exit 1
+          fi
