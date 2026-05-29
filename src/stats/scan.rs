@@ -1,6 +1,6 @@
 use super::cli::ResolvedStatOptions;
 use super::events::{parse_usage_json_event, UsageJsonPayload};
-use super::reports::{TokenUsage, UsageDiagnostics, UsageRateLimit, UsageRecordView};
+use super::reports::{TokenUsage, UsageDiagnostics, UsageMode, UsageRateLimit, UsageRecordView};
 use crate::account_history::UsageAccountHistory;
 use crate::error::AppError;
 use crate::limits::{parse_rate_limit_line, RateLimitLineContext, RateLimitParseDiagnostics};
@@ -11,6 +11,7 @@ use crate::session_scan::{
 };
 use crate::storage::path_to_string;
 use crate::time::DateRange;
+use crate::usage_mode_history::UsageModeHistory;
 use chrono::{DateTime, Utc};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -69,6 +70,7 @@ where
             file,
             prepared.range,
             options.account_history.as_ref(),
+            options.usage_mode_history.as_ref(),
             options.account_id.as_deref(),
             &mut on_record,
         )?;
@@ -93,6 +95,7 @@ where
             &prepared.files,
             prepared.range,
             options.account_history.as_ref(),
+            options.usage_mode_history.as_ref(),
             options.account_id.as_deref(),
             &mut accumulator,
         )?;
@@ -103,6 +106,7 @@ where
     let partitions = partition_items_for_workers(&prepared.files, worker_count);
     let range = prepared.range;
     let account_history = options.account_history.as_ref();
+    let usage_mode_history = options.usage_mode_history.as_ref();
     let account_id = options.account_id.as_deref();
     let mut partial_results = thread::scope(|scope| {
         let mut handles = Vec::with_capacity(partitions.len());
@@ -114,6 +118,7 @@ where
                     &partition,
                     range,
                     account_history,
+                    usage_mode_history,
                     account_id,
                     &mut partial_accumulator,
                 )?;
@@ -146,6 +151,19 @@ fn prepare_usage_scan(options: &ResolvedStatOptions) -> Result<PreparedUsageScan
     };
     let mut diagnostics =
         UsageDiagnostics::new(DEFAULT_FILE_READ_CONCURRENCY, options.scan_all_files);
+    diagnostics.mode_history = options.usage_mode_history_file.as_ref().map(|path| {
+        super::reports::UsageModeHistoryDiagnostics {
+            history_file: if options.usage_mode_history_include_path {
+                Some(path_to_string(path))
+            } else {
+                None
+            },
+            history_present: options.usage_mode_history_present,
+            switch_count: options.usage_mode_history_switch_count,
+            fast_attributed_calls: 0,
+            fast_attributed_credits: 0.0,
+        }
+    });
     let prepared = prepare_session_scan(
         SessionScanOptions {
             sessions_dir: &options.sessions_dir,
@@ -167,6 +185,7 @@ fn scan_usage_files_into_accumulator<A>(
     files: &[PreparedSessionFile],
     range: DateRange,
     account_history: Option<&UsageAccountHistory>,
+    usage_mode_history: Option<&UsageModeHistory>,
     account_id: Option<&str>,
     accumulator: &mut A,
 ) -> Result<UsageDiagnostics, AppError>
@@ -179,8 +198,14 @@ where
         let mut sink = AccumulatorRecordSink {
             accumulator: &mut *accumulator,
         };
-        let scan_diagnostics =
-            read_usage_records_from_file(file, range, account_history, account_id, &mut sink)?;
+        let scan_diagnostics = read_usage_records_from_file(
+            file,
+            range,
+            account_history,
+            usage_mode_history,
+            account_id,
+            &mut sink,
+        )?;
         diagnostics.merge_file_scan(&scan_diagnostics);
     }
 
@@ -275,6 +300,7 @@ fn read_usage_records_from_file<F>(
     usage_file: &PreparedSessionFile,
     range: DateRange,
     account_history: Option<&UsageAccountHistory>,
+    usage_mode_history: Option<&UsageModeHistory>,
     account_id_filter: Option<&str>,
     on_record: &mut F,
 ) -> Result<UsageDiagnostics, AppError>
@@ -440,10 +466,12 @@ where
 
         diagnostics.included_usage_events += 1;
         let rate_limits = usage_rate_limits_from_line(&line, &session_id, account_id.as_deref());
+        let usage_mode = resolve_usage_mode(timestamp, usage_mode_history);
         let record = UsageRecordView {
             timestamp,
             session_id: &session_id,
             model: &model,
+            usage_mode,
             reasoning_effort: reasoning_effort.as_deref(),
             cwd: &cwd,
             account_id: account_id.as_deref(),
@@ -494,6 +522,10 @@ fn resolve_usage_account_id(
     history.and_then(|history| history.account_id_at(timestamp))
 }
 
+fn resolve_usage_mode(timestamp: DateTime<Utc>, history: Option<&UsageModeHistory>) -> UsageMode {
+    UsageMode::from_fast(history.and_then(|history| history.fast_at(timestamp)))
+}
+
 fn diff_usage(current: Option<&TokenUsage>, previous: Option<&TokenUsage>) -> Option<TokenUsage> {
     let current = current?;
     let Some(previous) = previous else {
@@ -540,6 +572,7 @@ mod tests {
             sessions_dir,
             scan_all_files: false,
             account_history_file: None,
+            usage_mode_history_file: None,
             account_id: None,
         })
         .expect("read usage report");
@@ -572,6 +605,7 @@ mod tests {
             sessions_dir,
             scan_all_files: false,
             account_history_file: None,
+            usage_mode_history_file: None,
             account_id: None,
         })
         .expect("read usage report");
@@ -603,6 +637,7 @@ mod tests {
             sessions_dir,
             scan_all_files: false,
             account_history_file: Some(temp.path().join("missing-history.json")),
+            usage_mode_history_file: None,
             account_id: Some("account-fixture".to_string()),
         })
         .expect("read usage report");
@@ -689,6 +724,7 @@ mod tests {
             sessions_dir,
             scan_all_files: false,
             account_history_file: None,
+            usage_mode_history_file: None,
             account_id: None,
         })
         .expect("read usage report");
@@ -738,6 +774,7 @@ mod tests {
             sessions_dir,
             scan_all_files: false,
             account_history_file: None,
+            usage_mode_history_file: None,
             account_id: None,
         })
         .expect("read usage report");
@@ -807,6 +844,7 @@ mod tests {
             sessions_dir,
             scan_all_files: false,
             account_history_file: None,
+            usage_mode_history_file: None,
             account_id: None,
         })
         .expect("read usage report");

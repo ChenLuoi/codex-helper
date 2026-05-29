@@ -1,3 +1,4 @@
+use super::fast_candidates::{FastCandidateDiagnostics, FastCandidateReport, FastCandidateRow};
 use super::reports::{
     format_date_time, format_group_by, format_report_range, to_limit_usage_json,
     to_usage_session_detail_json, to_usage_sessions_json, to_usage_stats_json, usage_warnings,
@@ -11,9 +12,12 @@ use crate::format::{
     credits_to_usd, format_credits, format_csv, format_integer, format_markdown_table,
     format_plain_table, format_usd, round_credits, to_pretty_json,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use serde::Serialize;
 
 const DEFAULT_SESSION_DETAIL_COMPACT_ROWS: usize = 20;
+const FAST_CANDIDATE_DETECTION_NOTE: &str =
+    "Detection-only candidates. Review the session segment before recording local fast attribution.";
 
 pub(super) fn format_usage_stats(
     report: &UsageStatsReport,
@@ -250,12 +254,144 @@ pub(super) fn format_usage_session_detail(
     Ok(lines.join("\n"))
 }
 
+pub(super) fn format_fast_candidates(
+    report: &FastCandidateReport,
+    format: StatFormat,
+    verbose: bool,
+) -> Result<String, AppError> {
+    if format == StatFormat::Json {
+        return Ok(format!(
+            "{}\n",
+            to_pretty_json(&to_fast_candidates_json(report, verbose))
+                .map_err(|error| AppError::new(error.to_string()))?
+        ));
+    }
+
+    let mut rows = vec![fast_candidate_headers()];
+    rows.extend(report.candidates.iter().map(fast_candidate_row));
+
+    if format == StatFormat::Csv {
+        return Ok(format!("{}\n", format_csv(&rows)));
+    }
+
+    if format == StatFormat::Markdown {
+        let mut lines = vec![format_markdown_table(&rows)];
+        append_fast_candidate_notes(&mut lines, report, verbose);
+        return Ok(format!("{}\n", lines.join("\n")));
+    }
+
+    let mut lines = vec![
+        "Codex fast candidates".to_string(),
+        format!("Range: {}", format_report_range(report.start, report.end)),
+        format!("Limit window: {}", report.window),
+        String::new(),
+    ];
+
+    if report.candidates.is_empty() {
+        lines.push("No fast candidates found in this range.".to_string());
+    } else {
+        lines.push(format_plain_table(&rows));
+    }
+    append_fast_candidate_notes(&mut lines, report, verbose);
+    Ok(lines.join("\n"))
+}
+
 trait UsageReportNotes {
     fn start(&self) -> DateTime<Utc>;
     fn end(&self) -> DateTime<Utc>;
     fn totals(&self) -> &UsageStatRow;
     fn unpriced_models(&self) -> &[UsageUnpricedModelRow];
     fn diagnostics(&self) -> Option<&UsageDiagnostics>;
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FastCandidatesJson<'a> {
+    detection_only: bool,
+    window: &'a str,
+    start: String,
+    end: String,
+    sessions_dir: &'a str,
+    warnings: Vec<String>,
+    candidates: Vec<FastCandidateRowJson<'a>>,
+    diagnostics: &'a FastCandidateDiagnostics,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FastCandidateRowJson<'a> {
+    timestamp: String,
+    segment_start: String,
+    segment_end: String,
+    session_id: &'a str,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_id: Option<&'a str>,
+    resets_at: String,
+    sample_pairs: i64,
+    calls: i64,
+    total_tokens: i64,
+    delta_used_percent: f64,
+    normal_credits: f64,
+    percent_per_credit: f64,
+    baseline_percent_per_credit: f64,
+    effective_multiplier: f64,
+    expected_fast_multiplier: f64,
+    confidence: &'a str,
+    reason: &'a str,
+    suggested_fast_on_command: String,
+    suggested_fast_off_command: String,
+}
+
+fn to_fast_candidates_json(report: &FastCandidateReport, verbose: bool) -> FastCandidatesJson<'_> {
+    FastCandidatesJson {
+        detection_only: report.detection_only,
+        window: report.window,
+        start: iso_millis(report.start),
+        end: iso_millis(report.end),
+        sessions_dir: &report.sessions_dir,
+        warnings: fast_candidate_warnings(report),
+        candidates: report
+            .candidates
+            .iter()
+            .map(|row| to_fast_candidate_row_json(row, verbose))
+            .collect(),
+        diagnostics: &report.diagnostics,
+    }
+}
+
+fn to_fast_candidate_row_json(row: &FastCandidateRow, verbose: bool) -> FastCandidateRowJson<'_> {
+    FastCandidateRowJson {
+        timestamp: iso_millis(row.timestamp),
+        segment_start: iso_millis(row.segment_start),
+        segment_end: iso_millis(row.segment_end),
+        session_id: &row.session_id,
+        model: &row.model,
+        file_path: verbose.then_some(row.file_path.as_str()),
+        account_id: row.account_id.as_deref(),
+        plan_type: row.plan_type.as_deref(),
+        limit_id: row.limit_id.as_deref(),
+        resets_at: iso_millis(row.resets_at),
+        sample_pairs: row.sample_pairs,
+        calls: row.calls,
+        total_tokens: row.total_tokens,
+        delta_used_percent: row.delta_used_percent,
+        normal_credits: row.normal_credits,
+        percent_per_credit: row.percent_per_credit,
+        baseline_percent_per_credit: row.baseline_percent_per_credit,
+        effective_multiplier: row.effective_multiplier,
+        expected_fast_multiplier: row.expected_fast_multiplier,
+        confidence: row.confidence,
+        reason: row.reason,
+        suggested_fast_on_command: suggested_fast_on_command(row),
+        suggested_fast_off_command: suggested_fast_off_command(row),
+    }
 }
 
 impl UsageReportNotes for UsageStatsReport {
@@ -421,6 +557,28 @@ fn append_usage_notes<T: UsageReportNotes>(lines: &mut Vec<String>, report: &T, 
                 "  Usage events included: {}",
                 format_integer(diagnostics.included_usage_events)
             ));
+            if let Some(mode_history) = &diagnostics.mode_history {
+                lines.push(format!(
+                    "  Usage mode history present: {}",
+                    if mode_history.history_present {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ));
+                lines.push(format!(
+                    "  Usage mode switches: {}",
+                    format_integer(mode_history.switch_count)
+                ));
+                lines.push(format!(
+                    "  Fast attributed calls: {}",
+                    format_integer(mode_history.fast_attributed_calls)
+                ));
+                lines.push(format!(
+                    "  Fast attributed credits: {}",
+                    format_credits(mode_history.fast_attributed_credits)
+                ));
+            }
             lines.push(format!(
                 "  Skipped events: missing metadata {}, missing usage {}, empty usage {}, out of range {}, account mismatch {}, fork replay {}",
                 format_integer(diagnostics.skipped_events.missing_metadata),
@@ -464,6 +622,28 @@ fn append_limit_usage_notes(lines: &mut Vec<String>, report: &LimitUsageReport, 
                 "  Usage events included: {}",
                 format_integer(diagnostics.usage.included_usage_events)
             ));
+            if let Some(mode_history) = &diagnostics.usage.mode_history {
+                lines.push(format!(
+                    "  Usage mode history present: {}",
+                    if mode_history.history_present {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ));
+                lines.push(format!(
+                    "  Usage mode switches: {}",
+                    format_integer(mode_history.switch_count)
+                ));
+                lines.push(format!(
+                    "  Fast attributed calls: {}",
+                    format_integer(mode_history.fast_attributed_calls)
+                ));
+                lines.push(format!(
+                    "  Fast attributed credits: {}",
+                    format_credits(mode_history.fast_attributed_credits)
+                ));
+            }
             lines.push(format!(
                 "  Rate-limit samples included: {}",
                 format_integer(diagnostics.rate_limits.included_samples)
@@ -484,6 +664,68 @@ fn append_limit_usage_notes(lines: &mut Vec<String>, report: &LimitUsageReport, 
         lines.push(String::new());
         lines.extend(warnings);
     }
+}
+
+fn append_fast_candidate_notes(
+    lines: &mut Vec<String>,
+    report: &FastCandidateReport,
+    verbose: bool,
+) {
+    lines.push(String::new());
+    lines.extend(fast_candidate_warnings(report));
+    lines.push(
+        "Suggested commands are manual hints only; codex-ops does not run fast commands from this view."
+            .to_string(),
+    );
+
+    if verbose {
+        lines.push(String::new());
+        lines.push("Diagnostics:".to_string());
+        lines.push(format!(
+            "  5h samples: {}",
+            format_integer(report.diagnostics.five_hour_samples)
+        ));
+        lines.push(format!(
+            "  Sample pairs: {}",
+            format_integer(report.diagnostics.sample_pairs)
+        ));
+        lines.push(format!(
+            "  Active rising pairs: {}",
+            format_integer(report.diagnostics.rising_sample_pairs)
+        ));
+        lines.push(format!(
+            "  Segments with usage: {}",
+            format_integer(report.diagnostics.segments_with_usage)
+        ));
+        lines.push(format!(
+            "  Candidate segments: {}",
+            format_integer(report.diagnostics.candidate_segments)
+        ));
+        lines.push(format!(
+            "  Normal segments: {}",
+            format_integer(report.diagnostics.normal_segments)
+        ));
+        lines.push(format!(
+            "  Insufficient segments: {}",
+            format_integer(report.diagnostics.insufficient_segments)
+        ));
+        if !report.diagnostics.reason_counts.is_empty() {
+            lines.push("  Reasons:".to_string());
+            for row in &report.diagnostics.reason_counts {
+                lines.push(format!("    {}: {}", row.reason, format_integer(row.count)));
+            }
+        }
+    }
+}
+
+fn fast_candidate_warnings(report: &FastCandidateReport) -> Vec<String> {
+    let mut warnings = vec![FAST_CANDIDATE_DETECTION_NOTE.to_string()];
+    if report.diagnostics.no_five_hour_samples {
+        warnings.push(
+            "No 5h rate-limit samples were found; fast candidates require 5h samples.".to_string(),
+        );
+    }
+    warnings
 }
 
 fn append_unpriced_notes(
@@ -668,6 +910,44 @@ fn limit_usage_group_header(group_by: LimitUsageGroupBy) -> Option<&'static str>
 
 fn optional_cell(value: Option<&str>) -> String {
     value.unwrap_or_default().to_string()
+}
+
+fn fast_candidate_headers() -> Vec<String> {
+    [
+        "Segment End",
+        "Session",
+        "Model",
+        "Calls",
+        "Delta%",
+        "Multiplier",
+        "Guess",
+        "Confidence",
+        "Detection-only",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn fast_candidate_row(row: &FastCandidateRow) -> Vec<String> {
+    vec![
+        format_date_time(row.timestamp),
+        row.session_id.clone(),
+        row.model.clone(),
+        format_integer(row.calls),
+        format!("{:.2}", row.delta_used_percent),
+        format!(
+            "{:.2}x (expected {:.2}x)",
+            row.effective_multiplier, row.expected_fast_multiplier
+        ),
+        format!(
+            "fast on --at {}; fast off --at {}",
+            iso_millis(row.segment_start),
+            iso_millis(fast_off_at(row))
+        ),
+        row.confidence.to_string(),
+        "candidate".to_string(),
+    ]
 }
 
 fn session_headers() -> Vec<String> {
@@ -975,8 +1255,27 @@ fn indent_block(value: &str, prefix: &str) -> String {
         .join("\n")
 }
 
+fn iso_millis(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn suggested_fast_on_command(row: &FastCandidateRow) -> String {
+    format!("codex-ops fast on --at {}", iso_millis(row.segment_start))
+}
+
+fn suggested_fast_off_command(row: &FastCandidateRow) -> String {
+    format!("codex-ops fast off --at {}", iso_millis(fast_off_at(row)))
+}
+
+fn fast_off_at(row: &FastCandidateRow) -> DateTime<Utc> {
+    row.segment_end
+        .checked_add_signed(Duration::milliseconds(1))
+        .unwrap_or(row.segment_end)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::reports::UsageMode;
     use super::*;
     use crate::time::StatGroupBy;
     use chrono::TimeZone;
@@ -990,6 +1289,7 @@ mod tests {
                     .single()
                     .expect("time"),
                 model: if index < 15 { "gpt-5.5" } else { "gpt-5.4" }.to_string(),
+                usage_mode: UsageMode::Normal,
                 reasoning_effort: if index < 10 {
                     Some("high".to_string())
                 } else if index < 20 {

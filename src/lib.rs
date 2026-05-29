@@ -11,6 +11,7 @@ pub(crate) mod session_scan;
 pub mod stats;
 pub mod storage;
 pub mod time;
+pub mod usage_mode_history;
 
 use crate::auth::{
     format_auth_profile_entry, format_auth_profile_list, format_auth_status,
@@ -21,15 +22,21 @@ use crate::auth::{
 use crate::cli::{
     AuthCliCommand, AuthCliPaths, AuthProfileCliOptions, AuthRemoveCliOptions,
     AuthSelectCliOptions, AuthStatusCliOptions, CliCommand, DoctorCliCommand, DoctorCliPaths,
-    LimitCliCommand, ParsedCli, StatCliCommand,
+    FastCliCommand, FastCliOptions, LimitCliCommand, ParsedCli, StatCliCommand,
 };
 use crate::doctor::{format_doctor_report, read_doctor_report, DoctorOptions};
 use crate::error::AppError;
+use crate::format::to_pretty_json;
 use crate::limits::run_limit_command;
 use crate::prompt::{DialoguerPrompt, Prompt};
-use crate::stats::run_stat_command;
+use crate::stats::{run_fast_candidates_command, run_stat_command};
+use crate::storage::{path_to_string, resolve_storage_paths, StorageOptions};
+use crate::time::DateBound;
+use crate::usage_mode_history::UsageModeSwitchEvent;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::env;
+use std::path::{Path, PathBuf};
 
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -81,6 +88,7 @@ where
             CliCommand::Doctor(command) => run_doctor(command),
             CliCommand::Stat(command) => run_stat(command),
             CliCommand::Limit(command) => run_limit(command),
+            CliCommand::Fast(command) => run_fast(command),
         },
         Err(error) => CliResult::parse_error(error.code, error.message),
     }
@@ -361,6 +369,170 @@ fn run_limit(command: LimitCliCommand) -> CliResult {
     cli_result_from_string(result)
 }
 
+fn run_fast(command: FastCliCommand) -> CliResult {
+    let result = (|| run_fast_command(command, cli_now()?))();
+    cli_result_from_string(result)
+}
+
+fn run_fast_command(command: FastCliCommand, now: DateTime<Utc>) -> Result<String, AppError> {
+    match command {
+        FastCliCommand::On(options) => record_fast(options, true, now),
+        FastCliCommand::Off(options) => record_fast(options, false, now),
+        FastCliCommand::Status(options) => format_fast_status(options, now),
+        FastCliCommand::History(options) => format_fast_history(options),
+        FastCliCommand::Candidates(options) => run_fast_candidates_command(*options, now),
+    }
+}
+
+fn record_fast(
+    options: FastCliOptions,
+    fast: bool,
+    now: DateTime<Utc>,
+) -> Result<String, AppError> {
+    let path = usage_mode_history_file_path(&options);
+    let timestamp = fast_timestamp(options.at.as_deref(), now)?;
+    let current = usage_mode_history::read_usage_mode_history_store(&path)?;
+    let next = usage_mode_history::record_usage_mode_switch(current, fast, timestamp)?;
+    usage_mode_history::write_usage_mode_history_store(&path, &next)?;
+
+    if options.json {
+        return fast_record_json(&path, fast, timestamp);
+    }
+
+    Ok(format!(
+        "Recorded local fast attribution only. This does not change Codex settings.\nFast: {}\nAt: {}\nHistory file: {}\n",
+        fast_label(Some(fast)),
+        usage_mode_history::format_usage_mode_history_iso(timestamp),
+        path_to_string(&path)
+    ))
+}
+
+fn format_fast_status(options: FastCliOptions, now: DateTime<Utc>) -> Result<String, AppError> {
+    let path = usage_mode_history_file_path(&options);
+    let store = usage_mode_history::read_usage_mode_history_store(&path)?;
+    let fast = usage_mode_history::usage_mode_history_from_store(store.clone())?
+        .and_then(|history| history.fast_at(now));
+    let latest_switch = store.switches.last();
+
+    if options.json {
+        let json = FastStatusJson {
+            history_file: path_to_string(&path),
+            as_of: usage_mode_history::format_usage_mode_history_iso(now),
+            state: fast_label(fast).to_string(),
+            fast,
+            latest_switch,
+            switch_count: store.switches.len(),
+            recorded_local_attribution_only: true,
+            changes_codex_settings: false,
+        };
+        return to_pretty_json(&json).map_err(|error| AppError::new(error.to_string()));
+    }
+
+    let latest = latest_switch
+        .map(format_usage_mode_switch)
+        .unwrap_or_else(|| "none".to_string());
+    Ok(format!(
+        "Local fast attribution: {}\nAs of: {}\nLatest switch: {}\nSwitches: {}\nHistory file: {}\nRecorded local fast attribution only. This does not change Codex settings.\n",
+        fast_label(fast),
+        usage_mode_history::format_usage_mode_history_iso(now),
+        latest,
+        store.switches.len(),
+        path_to_string(&path)
+    ))
+}
+
+fn format_fast_history(options: FastCliOptions) -> Result<String, AppError> {
+    let path = usage_mode_history_file_path(&options);
+    let store = usage_mode_history::read_usage_mode_history_store(&path)?;
+
+    if options.json {
+        let json = FastHistoryJson {
+            history_file: path_to_string(&path),
+            default_mode: store.default_mode.as_ref(),
+            switches: &store.switches,
+            switch_count: store.switches.len(),
+            recorded_local_attribution_only: true,
+            changes_codex_settings: false,
+        };
+        return to_pretty_json(&json).map_err(|error| AppError::new(error.to_string()));
+    }
+
+    let mut output =
+        "Recorded local fast attribution only. This does not change Codex settings.\n".to_string();
+    output.push_str(&format!("History file: {}\n", path_to_string(&path)));
+
+    if let Some(default_mode) = &store.default_mode {
+        output.push_str(&format!(
+            "Default: {} at {} ({})\n",
+            fast_label(Some(default_mode.fast)),
+            default_mode.observed_at,
+            default_mode.source
+        ));
+    }
+
+    if store.switches.is_empty() {
+        output.push_str("No local fast attribution switches recorded.\n");
+        return Ok(output);
+    }
+
+    output.push_str("\nTime                     Fast    Source\n");
+    output.push_str("-----------------------  ------  ----------------\n");
+    for entry in &store.switches {
+        output.push_str(&format!(
+            "{:<23}  {:<6}  {}\n",
+            entry.timestamp,
+            fast_label(Some(entry.fast)),
+            entry.source
+        ));
+    }
+
+    Ok(output)
+}
+
+fn fast_timestamp(at: Option<&str>, now: DateTime<Utc>) -> Result<DateTime<Utc>, AppError> {
+    match at {
+        Some(value) => time::parse_date_bound(value, DateBound::Start),
+        None => Ok(now),
+    }
+}
+
+fn usage_mode_history_file_path(options: &FastCliOptions) -> PathBuf {
+    resolve_storage_paths(&StorageOptions {
+        usage_mode_history_file: options.usage_mode_history_file.clone(),
+        ..StorageOptions::default()
+    })
+    .usage_mode_history_file
+}
+
+fn fast_label(fast: Option<bool>) -> &'static str {
+    match fast {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "unknown",
+    }
+}
+
+fn format_usage_mode_switch(entry: &UsageModeSwitchEvent) -> String {
+    format!(
+        "{} -> {} ({})",
+        entry.timestamp,
+        fast_label(Some(entry.fast)),
+        entry.source
+    )
+}
+
+fn fast_record_json(path: &Path, fast: bool, timestamp: DateTime<Utc>) -> Result<String, AppError> {
+    let json = FastRecordJson {
+        history_file: path_to_string(path),
+        timestamp: usage_mode_history::format_usage_mode_history_iso(timestamp),
+        state: fast_label(Some(fast)),
+        fast,
+        recorded_local_attribution_only: true,
+        changes_codex_settings: false,
+    };
+    to_pretty_json(&json).map_err(|error| AppError::new(error.to_string()))
+}
+
 fn auth_command_options(paths: &AuthCliPaths) -> AuthCommandOptions {
     AuthCommandOptions {
         auth_file: paths.auth_file.clone(),
@@ -368,6 +540,43 @@ fn auth_command_options(paths: &AuthCliPaths) -> AuthCommandOptions {
         store_dir: paths.store_dir.clone(),
         account_history_file: paths.account_history_file.clone(),
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FastRecordJson {
+    history_file: String,
+    timestamp: String,
+    state: &'static str,
+    fast: bool,
+    recorded_local_attribution_only: bool,
+    changes_codex_settings: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FastStatusJson<'a> {
+    history_file: String,
+    as_of: String,
+    state: String,
+    fast: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_switch: Option<&'a UsageModeSwitchEvent>,
+    switch_count: usize,
+    recorded_local_attribution_only: bool,
+    changes_codex_settings: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FastHistoryJson<'a> {
+    history_file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_mode: Option<&'a usage_mode_history::UsageModeDefault>,
+    switches: &'a [UsageModeSwitchEvent],
+    switch_count: usize,
+    recorded_local_attribution_only: bool,
+    changes_codex_settings: bool,
 }
 
 fn doctor_command_options(paths: &DoctorCliPaths) -> DoctorOptions {

@@ -10,14 +10,16 @@
       "label": "GPT-5.5",
       "input_credits_per_million": 125.0,
       "cached_input_credits_per_million": 12.5,
-      "output_credits_per_million": 750.0
+      "output_credits_per_million": 750.0,
+      "fast_credit_multiplier": 2.5
     },
     {
       "key": "gpt-5.4",
       "label": "GPT-5.4",
       "input_credits_per_million": 62.5,
       "cached_input_credits_per_million": 6.25,
-      "output_credits_per_million": 375.0
+      "output_credits_per_million": 375.0,
+      "fast_credit_multiplier": 2.0
     },
     {
       "key": "gpt-5.4-mini",

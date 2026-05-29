@@ -75,6 +75,7 @@ struct ResolvedLimitOptions {
     format: LimitFormat,
     sessions_dir: PathBuf,
     account_history_file: Option<PathBuf>,
+    usage_mode_history_file: Option<PathBuf>,
     account_id: Option<String>,
     window_minutes: Option<i64>,
     early_only: bool,
@@ -154,6 +155,7 @@ fn read_limit_usage_records(
         sessions_dir: resolved.sessions_dir.clone(),
         scan_all_files: false,
         account_history_file: resolved.account_history_file.clone(),
+        usage_mode_history_file: resolved.usage_mode_history_file.clone(),
         account_id: resolved.account_id.clone(),
     })?
     .records)
@@ -184,6 +186,7 @@ fn resolve_limit_options(
         auth_file: raw.auth_file.clone(),
         profile_store_dir: None,
         account_history_file: raw.account_history_file.clone(),
+        usage_mode_history_file: None,
         sessions_dir: raw.sessions_dir.clone(),
     });
 
@@ -207,6 +210,7 @@ fn resolve_limit_options(
         format,
         sessions_dir: paths.sessions_dir,
         account_history_file: Some(paths.account_history_file),
+        usage_mode_history_file: Some(paths.usage_mode_history_file),
         account_id,
         window_minutes: match raw.window.as_deref() {
             Some(value) => Some(LimitWindowSelector::parse(value)?.window_minutes()),

@@ -11,6 +11,7 @@ pub struct StoragePaths {
     pub auth_file: PathBuf,
     pub profile_store_dir: PathBuf,
     pub account_history_file: PathBuf,
+    pub usage_mode_history_file: PathBuf,
     pub sessions_dir: PathBuf,
 }
 
@@ -20,6 +21,7 @@ pub struct StorageOptions {
     pub auth_file: Option<PathBuf>,
     pub profile_store_dir: Option<PathBuf>,
     pub account_history_file: Option<PathBuf>,
+    pub usage_mode_history_file: Option<PathBuf>,
     pub sessions_dir: Option<PathBuf>,
 }
 
@@ -62,6 +64,10 @@ pub fn resolve_storage_paths(options: &StorageOptions) -> StoragePaths {
             .account_history_file
             .clone()
             .unwrap_or_else(|| helper_dir.join("auth-account-history.json")),
+        usage_mode_history_file: options
+            .usage_mode_history_file
+            .clone()
+            .unwrap_or_else(|| helper_dir.join("usage-mode-history.json")),
         sessions_dir: options
             .sessions_dir
             .clone()
@@ -187,6 +193,10 @@ mod tests {
             PathBuf::from("/tmp/codex-home/codex-ops/auth-account-history.json")
         );
         assert_eq!(
+            paths.usage_mode_history_file,
+            PathBuf::from("/tmp/codex-home/codex-ops/usage-mode-history.json")
+        );
+        assert_eq!(
             paths.sessions_dir,
             PathBuf::from("/tmp/codex-home/sessions")
         );
@@ -199,6 +209,7 @@ mod tests {
             auth_file: Some(PathBuf::from("/tmp/auth.json")),
             profile_store_dir: Some(PathBuf::from("/tmp/profiles")),
             account_history_file: Some(PathBuf::from("/tmp/history.json")),
+            usage_mode_history_file: Some(PathBuf::from("/tmp/mode-history.json")),
             sessions_dir: Some(PathBuf::from("/tmp/sessions")),
         });
 
@@ -207,6 +218,10 @@ mod tests {
         assert_eq!(
             paths.account_history_file,
             PathBuf::from("/tmp/history.json")
+        );
+        assert_eq!(
+            paths.usage_mode_history_file,
+            PathBuf::from("/tmp/mode-history.json")
         );
         assert_eq!(paths.sessions_dir, PathBuf::from("/tmp/sessions"));
     }

@@ -2,13 +2,15 @@ mod common;
 
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use common::{
-    assert_array, assert_contains, assert_failure_contains, assert_json_eq,
-    assert_json_local_day_end, assert_json_local_day_start, assert_limit_usage_diagnostics_schema,
+    assert_array, assert_contains, assert_failure_contains, assert_fast_candidate_row_schema,
+    assert_fast_candidates_report_schema, assert_json_eq, assert_json_local_day_end,
+    assert_json_local_day_start, assert_limit_usage_diagnostics_schema,
     assert_limit_usage_row_schema, assert_no_limit_source_leakage,
     assert_no_source_paths_by_default, assert_success, assert_usage_diagnostics_schema,
     assert_usage_totals_schema, fixed_now_utc, parse_csv, parse_json, run_codex_ops, Sandbox,
     FIXED_NOW,
 };
+use serde_json::Value;
 use std::fs;
 
 #[test]
@@ -335,6 +337,454 @@ fn stat_format_outputs_and_sessions_view_remain_stable() {
 }
 
 #[test]
+fn stat_uses_usage_mode_history_for_fast_credit_attribution() {
+    let sandbox = Sandbox::new();
+    let history_file = sandbox.fixture_usage_mode_history_file.to_str().unwrap();
+
+    let stat = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--json",
+            "--verbose",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--usage-mode-history-file",
+            history_file,
+        ],
+        &sandbox,
+    );
+    assert_success(&stat, "stat fast history json");
+    let report = parse_json(&stat.stdout, "stat fast history json");
+    assert_json_eq(
+        &report["totals"]["usage"]["totalTokens"],
+        3600,
+        "fast history leaves tokens unchanged",
+    );
+    assert_json_f64(&report["totals"]["credits"], 2.092188, "fast stat credits");
+    let mode_history = &report["diagnostics"]["modeHistory"];
+    assert_json_eq(
+        &mode_history["historyFile"],
+        history_file,
+        "verbose json mode history path",
+    );
+    assert_json_eq(
+        &mode_history["historyPresent"],
+        true,
+        "mode history present",
+    );
+    assert_json_eq(&mode_history["switchCount"], 2, "mode switch count");
+    assert_json_eq(
+        &mode_history["fastAttributedCalls"],
+        2,
+        "fast attributed calls",
+    );
+    assert_json_f64(
+        &mode_history["fastAttributedCredits"],
+        2.092188,
+        "fast attributed credits",
+    );
+
+    let model_group = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--group-by",
+            "model",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--usage-mode-history-file",
+            history_file,
+        ],
+        &sandbox,
+    );
+    assert_success(&model_group, "stat fast history model group json");
+    let model_report = parse_json(&model_group.stdout, "stat fast history model group json");
+    let model_rows = assert_array(&model_report["rows"], "fast model rows");
+    assert!(
+        model_rows
+            .iter()
+            .any(|row| row["key"].as_str() == Some("gpt-5.5-fast")),
+        "fast usage should be grouped under a distinct model key"
+    );
+    assert!(
+        !model_rows
+            .iter()
+            .any(|row| row["key"].as_str() == Some("gpt-5.5")),
+        "fast-only gpt-5.5 usage should not be merged into the normal model key"
+    );
+
+    let default_json = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--usage-mode-history-file",
+            history_file,
+        ],
+        &sandbox,
+    );
+    assert_success(&default_json, "stat fast history default json");
+    let default_report = parse_json(&default_json.stdout, "stat fast history default json");
+    let default_mode_history = default_report["diagnostics"]["modeHistory"]
+        .as_object()
+        .expect("modeHistory object");
+    assert!(
+        !default_mode_history.contains_key("historyFile"),
+        "default JSON diagnostics should not include usage mode history path"
+    );
+
+    let detail = run_codex_ops(
+        [
+            "stat",
+            "sessions",
+            "rust-run-session-alpha",
+            "--all",
+            "--detail",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--usage-mode-history-file",
+            history_file,
+        ],
+        &sandbox,
+    );
+    assert_success(&detail, "stat session detail fast history json");
+    let detail_report = parse_json(&detail.stdout, "stat session detail fast history json");
+    assert_json_f64(
+        &detail_report["summary"]["credits"],
+        2.092188,
+        "fast session summary credits",
+    );
+    for row in assert_array(&detail_report["rows"], "fast detail rows") {
+        assert_json_eq(&row["usageMode"], "fast", "fast detail row mode");
+    }
+
+    let limit_window = run_codex_ops(
+        [
+            "stat",
+            "--all",
+            "--limit-window",
+            "7d",
+            "--json",
+            "--sessions-dir",
+            sandbox.sessions_dir.to_str().unwrap(),
+            "--account-history-file",
+            sandbox.account_history_file.to_str().unwrap(),
+            "--usage-mode-history-file",
+            history_file,
+        ],
+        &sandbox,
+    );
+    assert_success(&limit_window, "stat limit-window fast history json");
+    let limit_report = parse_json(&limit_window.stdout, "stat limit-window fast history json");
+    let first_row = &assert_array(&limit_report["rows"], "fast limit rows")[0];
+    assert_json_eq(&first_row["calls"], 2, "fast limit row calls");
+    assert_json_eq(
+        &first_row["usage"]["totalTokens"],
+        3100,
+        "fast limit row tokens",
+    );
+    assert_json_f64(&first_row["credits"], 2.092188, "fast limit row credits");
+    assert_json_f64(
+        &limit_report["diagnostics"]["usage"]["modeHistory"]["fastAttributedCredits"],
+        2.092188,
+        "fast limit diagnostics credits",
+    );
+
+    for format in ["table", "csv", "markdown"] {
+        let result = run_codex_ops(
+            [
+                "stat",
+                "--all",
+                "--format",
+                format,
+                "--verbose",
+                "--sessions-dir",
+                sandbox.sessions_dir.to_str().unwrap(),
+                "--usage-mode-history-file",
+                history_file,
+            ],
+            &sandbox,
+        );
+        assert_success(&result, &format!("stat fast history {format}"));
+        assert!(
+            !result.stdout.contains(history_file),
+            "stat fast history {format}: output leaked usage mode history path"
+        );
+    }
+}
+
+#[test]
+fn fast_candidates_outputs_detection_only_candidates() {
+    let sandbox = Sandbox::new();
+    let sessions_dir = &sandbox.fast_candidate_sessions_dir;
+    let session_file =
+        sessions_dir.join("2026/05/10/rollout-2026-05-10T00-00-00-fast-candidates.jsonl");
+
+    let json = run_codex_ops(
+        [
+            "fast",
+            "candidates",
+            "--start",
+            "2026-05-10T00:00:00Z",
+            "--end",
+            "2026-05-10T04:00:00Z",
+            "--json",
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&json, "fast candidates json");
+    assert!(
+        !json.stdout.contains(session_file.to_str().unwrap()),
+        "fast candidates default JSON leaked source path"
+    );
+    let report = parse_json(&json.stdout, "fast candidates json");
+    assert_fast_candidates_report_schema(&report, "fast-candidates report");
+    assert_json_eq(
+        &report["detectionOnly"],
+        true,
+        "fast-candidates detectionOnly",
+    );
+    assert_json_eq(&report["window"], "5h", "fast-candidates window");
+    assert_contains(
+        report["warnings"][0].as_str().unwrap_or_default(),
+        "Detection-only",
+        "fast-candidates JSON detection note",
+    );
+    assert_no_source_paths_by_default(&report, "fast candidates default json");
+
+    let candidates = assert_array(&report["candidates"], "fast candidates");
+    assert_eq!(candidates.len(), 1, "fast candidate count");
+    for (index, candidate) in candidates.iter().enumerate() {
+        assert_fast_candidate_row_schema(candidate, &format!("fast candidate row {index}"));
+    }
+    let candidate = &candidates[0];
+    assert_json_eq(
+        &candidate["sessionId"],
+        "fast-candidate",
+        "fast-candidate session id",
+    );
+    assert_json_eq(&candidate["calls"], 6, "fast-candidate calls");
+    assert_json_eq(&candidate["samplePairs"], 6, "fast-candidate sample pairs");
+    assert_json_f64(
+        &candidate["effectiveMultiplier"],
+        2.25,
+        "fast-candidate effective multiplier",
+    );
+    assert_json_f64(
+        &candidate["expectedFastMultiplier"],
+        2.25,
+        "fast-candidate expected multiplier",
+    );
+    assert_json_eq(
+        &candidate["reason"],
+        "mixedModelsWeightedExpectedMultiplier",
+        "fast-candidate mixed reason",
+    );
+    assert_json_eq(
+        &candidate["confidence"],
+        "high",
+        "fast-candidate confidence",
+    );
+    assert_contains(
+        candidate["suggestedFastOnCommand"]
+            .as_str()
+            .unwrap_or_default(),
+        "codex-ops fast on --at",
+        "fast-candidates on command",
+    );
+    assert_contains(
+        candidate["suggestedFastOffCommand"]
+            .as_str()
+            .unwrap_or_default(),
+        "codex-ops fast off --at",
+        "fast-candidates off command",
+    );
+    assert_json_eq(
+        &candidate["segmentEnd"],
+        "2026-05-10T02:45:00.000Z",
+        "fast-candidate segment end",
+    );
+    assert_json_eq(
+        &candidate["suggestedFastOffCommand"],
+        "codex-ops fast off --at 2026-05-10T02:45:00.001Z",
+        "fast-candidate off command is exclusive",
+    );
+
+    let verbose_json = run_codex_ops(
+        [
+            "fast",
+            "candidates",
+            "--start",
+            "2026-05-10T00:00:00Z",
+            "--end",
+            "2026-05-10T04:00:00Z",
+            "--json",
+            "--verbose",
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&verbose_json, "fast candidates verbose json");
+    assert_contains(
+        &verbose_json.stdout,
+        session_file.to_str().unwrap(),
+        "verbose fast-candidates JSON includes source path",
+    );
+
+    for format in ["table", "csv", "markdown"] {
+        let result = run_codex_ops(
+            [
+                "fast",
+                "candidates",
+                "--start",
+                "2026-05-10T00:00:00Z",
+                "--end",
+                "2026-05-10T04:00:00Z",
+                "--format",
+                format,
+                "--sessions-dir",
+                sessions_dir.to_str().unwrap(),
+            ],
+            &sandbox,
+        );
+        assert_success(&result, &format!("fast candidates {format}"));
+        assert_contains(
+            &result.stdout,
+            "Detection-only",
+            &format!("fast candidates {format} detection note"),
+        );
+        assert_contains(
+            &result.stdout,
+            "candidate",
+            &format!("fast candidates {format} candidate label"),
+        );
+        assert_contains(
+            &result.stdout,
+            "fast on",
+            &format!("fast candidates {format} command hint"),
+        );
+        assert!(
+            !result.stdout.contains(session_file.to_str().unwrap()),
+            "fast candidates {format} leaked source path"
+        );
+    }
+
+    let table = run_codex_ops(
+        [
+            "fast",
+            "candidates",
+            "--start",
+            "2026-05-10T00:00:00Z",
+            "--end",
+            "2026-05-10T04:00:00Z",
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&table, "fast candidates table default");
+    assert_contains(
+        &table.stdout,
+        "fast off --at 2026-05-10T02:45:00.001Z",
+        "fast candidates table exclusive off command",
+    );
+    for header in [
+        "Segment End",
+        "Session",
+        "Model",
+        "Calls",
+        "Delta%",
+        "Multiplier",
+        "Guess",
+        "Confidence",
+    ] {
+        assert_contains(&table.stdout, header, "fast-candidates table header");
+    }
+
+    let singular_alias = run_codex_ops(
+        [
+            "fast",
+            "candidate",
+            "--start",
+            "2026-05-10T00:00:00Z",
+            "--end",
+            "2026-05-10T04:00:00Z",
+            "--json",
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+    assert_success(&singular_alias, "fast candidate alias json");
+}
+
+#[test]
+fn fast_candidates_account_filter_populates_missing_account_history() {
+    let sandbox = Sandbox::new();
+    fs::remove_file(&sandbox.account_history_file).expect("remove account history fixture");
+
+    let json = run_codex_ops(
+        [
+            "fast",
+            "candidates",
+            "--start",
+            "2026-05-10T00:00:00Z",
+            "--end",
+            "2026-05-10T04:00:00Z",
+            "--account-id",
+            "account-fixture",
+            "--json",
+            "--sessions-dir",
+            sandbox.fast_candidate_sessions_dir.to_str().unwrap(),
+        ],
+        &sandbox,
+    );
+
+    assert_success(&json, "fast candidates account-filter json");
+    assert!(
+        sandbox.account_history_file.exists(),
+        "fast-candidates account filter should populate missing account history"
+    );
+    let report = parse_json(&json.stdout, "fast candidates account-filter json");
+    let candidates = assert_array(&report["candidates"], "account-filter fast candidates");
+    assert_eq!(candidates.len(), 1, "account-filter fast candidate count");
+    assert_json_eq(
+        &candidates[0]["accountId"],
+        "account-fixture",
+        "account-filter candidate account id",
+    );
+}
+
+#[test]
+fn fast_candidates_rejects_window_and_session_inputs() {
+    let sandbox = Sandbox::new();
+
+    let limit_window = run_codex_ops(["fast", "candidates", "--limit-window", "5h"], &sandbox);
+    assert_failure_contains(
+        &limit_window,
+        2,
+        "unexpected argument '--limit-window'",
+        "fast candidates rejects limit-window",
+    );
+
+    let session = run_codex_ops(["fast", "candidates", "session-id"], &sandbox);
+    assert_failure_contains(
+        &session,
+        2,
+        "unexpected argument 'session-id'",
+        "fast candidates rejects session id",
+    );
+}
+
+#[test]
 fn stat_limit_window_usage_outputs_real_window_rows() {
     let sandbox = Sandbox::new();
 
@@ -507,6 +957,16 @@ fn stat_limit_window_usage_outputs_real_window_rows() {
     assert!(
         !markdown.stdout.contains("Group key"),
         "limit usage markdown should omit group key"
+    );
+}
+
+fn assert_json_f64(value: &Value, expected: f64, label: &str) {
+    let actual = value
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label}: expected JSON number, got {value}"));
+    assert!(
+        (actual - expected).abs() < 0.000001,
+        "{label}: expected {expected}, got {actual}"
     );
 }
 

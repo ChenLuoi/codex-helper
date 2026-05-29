@@ -105,6 +105,7 @@ pub fn read_doctor_report(options: &DoctorOptions, now: DateTime<Utc>) -> Doctor
         sessions_dir: options.sessions_dir.clone(),
         profile_store_dir: None,
         account_history_file: None,
+        usage_mode_history_file: None,
     });
 
     let checks = vec![
@@ -521,6 +522,7 @@ fn read_recent_usage_summary(
         sessions_dir: sessions_dir.to_path_buf(),
         scan_all_files: false,
         account_history_file: None,
+        usage_mode_history_file: None,
         account_id: None,
     })
     .map_err(|error| error.message().to_string())?;

@@ -16,6 +16,7 @@ pub struct ModelPricing {
     pub input_credits_per_million: f64,
     pub cached_input_credits_per_million: f64,
     pub output_credits_per_million: f64,
+    pub fast_credit_multiplier: f64,
     pub note: Option<String>,
 }
 
@@ -42,7 +43,29 @@ pub struct CreditCost {
     pub billable_input_tokens: u64,
     pub cached_input_tokens: u64,
     pub output_tokens: u64,
+    pub credit_multiplier: f64,
     pub credits: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PricingContext {
+    pub fast: bool,
+}
+
+impl PricingContext {
+    pub const fn normal() -> Self {
+        Self { fast: false }
+    }
+
+    pub const fn fast() -> Self {
+        Self { fast: true }
+    }
+}
+
+impl Default for PricingContext {
+    fn default() -> Self {
+        Self::normal()
+    }
 }
 
 const RATE_CARD_JSON: &str = include_str!("../data/codex-rate-card.json");
@@ -81,6 +104,7 @@ struct RawModelPricing {
     input_credits_per_million: f64,
     cached_input_credits_per_million: f64,
     output_credits_per_million: f64,
+    fast_credit_multiplier: Option<f64>,
     note: Option<String>,
 }
 
@@ -144,23 +168,41 @@ pub fn list_known_unpriced_models() -> Vec<KnownUnpricedModel> {
 }
 
 pub fn calculate_credit_cost(model: &str, usage: TokenUsage) -> CreditCost {
+    calculate_credit_cost_with_context(model, usage, PricingContext::normal())
+}
+
+pub fn calculate_credit_cost_with_context(
+    model: &str,
+    usage: TokenUsage,
+    context: PricingContext,
+) -> CreditCost {
     let cached_input_tokens = usage.cached_input_tokens.min(usage.input_tokens);
     let billable_input_tokens = usage.input_tokens.saturating_sub(cached_input_tokens);
     let pricing = get_model_pricing(model);
 
     match pricing {
-        Some(pricing) => CreditCost {
-            priced: true,
-            pricing_label: pricing.label.to_string(),
-            unpriced_reason: None,
-            billable_input_tokens,
-            cached_input_tokens,
-            output_tokens: usage.output_tokens,
-            credits: (billable_input_tokens as f64 * pricing.input_credits_per_million
+        Some(pricing) => {
+            let credit_multiplier = if context.fast {
+                pricing.fast_credit_multiplier
+            } else {
+                1.0
+            };
+            let normal_credits = (billable_input_tokens as f64 * pricing.input_credits_per_million
                 + cached_input_tokens as f64 * pricing.cached_input_credits_per_million
                 + usage.output_tokens as f64 * pricing.output_credits_per_million)
-                / 1_000_000.0,
-        },
+                / 1_000_000.0;
+
+            CreditCost {
+                priced: true,
+                pricing_label: pricing.label.to_string(),
+                unpriced_reason: None,
+                billable_input_tokens,
+                cached_input_tokens,
+                output_tokens: usage.output_tokens,
+                credit_multiplier,
+                credits: normal_credits * credit_multiplier,
+            }
+        }
         None => CreditCost {
             priced: false,
             pricing_label: model.to_string(),
@@ -168,6 +210,7 @@ pub fn calculate_credit_cost(model: &str, usage: TokenUsage) -> CreditCost {
             billable_input_tokens,
             cached_input_tokens,
             output_tokens: usage.output_tokens,
+            credit_multiplier: 1.0,
             credits: 0.0,
         },
     }
@@ -208,6 +251,7 @@ fn convert_models(raw: Vec<RawModelPricing>) -> Vec<ModelPricing> {
             input_credits_per_million: model.input_credits_per_million,
             cached_input_credits_per_million: model.cached_input_credits_per_million,
             output_credits_per_million: model.output_credits_per_million,
+            fast_credit_multiplier: model.fast_credit_multiplier.unwrap_or(1.0),
             note: model.note,
         })
         .collect()
@@ -271,6 +315,9 @@ fn validate_rate_card(raw: &RawRateCard) {
             model.output_credits_per_million,
             "models[].output_credits_per_million",
         );
+        if let Some(multiplier) = model.fast_credit_multiplier {
+            assert_positive_finite(multiplier, "models[].fast_credit_multiplier");
+        }
     }
 
     let mut known_unpriced_keys = HashSet::new();
@@ -301,6 +348,12 @@ fn assert_non_empty(value: &str, path: &str) {
 fn assert_non_negative_finite(value: f64, path: &str) {
     if !value.is_finite() || value < 0.0 {
         panic!("data/codex-rate-card.json field {path} must be finite and non-negative");
+    }
+}
+
+fn assert_positive_finite(value: f64, path: &str) {
+    if !value.is_finite() || value <= 0.0 {
+        panic!("data/codex-rate-card.json field {path} must be finite and positive");
     }
 }
 
@@ -336,7 +389,41 @@ mod tests {
         assert_eq!(cost.billable_input_tokens, 800);
         assert_eq!(cost.cached_input_tokens, 200);
         assert_eq!(cost.output_tokens, 300);
+        assert_eq!(cost.credit_multiplier, 1.0);
         assert!((cost.credits - 0.3275).abs() < 0.000001);
+    }
+
+    #[test]
+    fn applies_fast_credit_multiplier_from_rate_card() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            cached_input_tokens: 200,
+            output_tokens: 300,
+        };
+
+        let gpt55 = calculate_credit_cost_with_context("gpt-5.5", usage, PricingContext::fast());
+        let gpt54 = calculate_credit_cost_with_context("gpt-5.4", usage, PricingContext::fast());
+
+        assert_eq!(gpt55.credit_multiplier, 2.5);
+        assert!((gpt55.credits - 0.81875).abs() < 0.000001);
+        assert_eq!(gpt54.credit_multiplier, 2.0);
+        assert!((gpt54.credits - 0.3275).abs() < 0.000001);
+    }
+
+    #[test]
+    fn models_without_fast_multiplier_default_to_one() {
+        let cost = calculate_credit_cost_with_context(
+            "gpt-5.2",
+            TokenUsage {
+                input_tokens: 1000,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+            },
+            PricingContext::fast(),
+        );
+
+        assert_eq!(cost.credit_multiplier, 1.0);
+        assert!((cost.credits - 0.04375).abs() < 0.000001);
     }
 
     #[test]
@@ -354,6 +441,7 @@ mod tests {
         assert_eq!(cost.pricing_label, "future-model");
         assert_eq!(cost.billable_input_tokens, 0);
         assert_eq!(cost.cached_input_tokens, 100);
+        assert_eq!(cost.credit_multiplier, 1.0);
         assert_eq!(cost.credits, 0.0);
     }
 
@@ -412,7 +500,8 @@ mod tests {
                         "label": "Priced Model",
                         "input_credits_per_million": 1.0,
                         "cached_input_credits_per_million": 0.5,
-                        "output_credits_per_million": 2.0
+                        "output_credits_per_million": 2.0,
+                        "fast_credit_multiplier": 3.0
                     }
                 ],
                 "knownUnpriced": [
@@ -426,6 +515,7 @@ mod tests {
         );
 
         assert_eq!(rate_card.source.credits_per_usd, 50.0);
+        assert_eq!(rate_card.models[0].fast_credit_multiplier, 3.0);
         assert_eq!(rate_card.known_unpriced.len(), 1);
         assert_eq!(rate_card.known_unpriced[0].key, "future-model");
         assert_eq!(
@@ -438,5 +528,30 @@ mod tests {
     #[should_panic(expected = "credit_to_usd must match")]
     fn invalid_credit_exchange_rate_format_is_rejected() {
         parse_credits_per_usd("25 = $1");
+    }
+
+    #[test]
+    #[should_panic(expected = "fast_credit_multiplier")]
+    fn invalid_fast_multiplier_is_rejected() {
+        load_rate_card_from_str(
+            r#"{
+                "source": {
+                    "name": "test",
+                    "checked_at": "2026-05-27",
+                    "credit_to_usd": "50 credits = $1"
+                },
+                "models": [
+                    {
+                        "key": "priced-model",
+                        "label": "Priced Model",
+                        "input_credits_per_million": 1.0,
+                        "cached_input_credits_per_million": 0.5,
+                        "output_credits_per_million": 2.0,
+                        "fast_credit_multiplier": 0.0
+                    }
+                ],
+                "knownUnpriced": []
+            }"#,
+        );
     }
 }

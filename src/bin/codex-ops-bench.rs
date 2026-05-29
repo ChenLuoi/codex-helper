@@ -21,6 +21,17 @@ const BENCHMARK_CASES: &[BenchCase] = &[
         args: &["auth", "status", "--auth-file", "{authFile}", "--json"],
     },
     BenchCase {
+        id: "fast-status-json",
+        groups: &["fast"],
+        args: &[
+            "fast",
+            "status",
+            "--usage-mode-history-file",
+            "{fixtureUsageModeHistoryFile}",
+            "--json",
+        ],
+    },
+    BenchCase {
         id: "doctor-json",
         groups: &["doctor"],
         args: &[
@@ -112,6 +123,34 @@ const BENCHMARK_CASES: &[BenchCase] = &[
         ],
     },
     BenchCase {
+        id: "stat-fast-history-json",
+        groups: &["stat", "fast"],
+        args: &[
+            "stat",
+            "--all",
+            "--json",
+            "--usage-mode-history-file",
+            "{fixtureUsageModeHistoryFile}",
+            "--sessions-dir",
+            "{sessionsDir}",
+        ],
+    },
+    BenchCase {
+        id: "fast-candidates-json",
+        groups: &["fast"],
+        args: &[
+            "fast",
+            "candidates",
+            "--start",
+            "2026-05-10T00:00:00Z",
+            "--end",
+            "2026-05-10T04:00:00Z",
+            "--json",
+            "--sessions-dir",
+            "{fastCandidateSessionsDir}",
+        ],
+    },
+    BenchCase {
         id: "stat-sessions-json",
         groups: &["stat"],
         args: &[
@@ -173,6 +212,8 @@ struct Sandbox {
     auth_file: PathBuf,
     sessions_dir: PathBuf,
     account_history_file: PathBuf,
+    fixture_usage_mode_history_file: PathBuf,
+    fast_candidate_sessions_dir: PathBuf,
 }
 
 impl Drop for Sandbox {
@@ -340,7 +381,7 @@ summary. This is a smoke benchmark, not a historical JS comparison harness.
 Options:
   --fixture <path>       Fixture root, default test/fixtures/rust-run
   --runs <n>             Warm runs per command, default 1
-  --matrix <groups>      all, auth, doctor, stat, limit, poc; comma-separated
+  --matrix <groups>      all, auth, doctor, stat, limit, fast, poc; comma-separated
   --rust-binary <path>   Production Rust binary, default target/release/codex-ops
   -h, --help             Print help"
     );
@@ -389,6 +430,8 @@ fn prepare_sandbox(fixture: &Path) -> Result<Sandbox, String> {
         auth_file: codex_home.join("auth.json"),
         sessions_dir: codex_home.join("sessions"),
         account_history_file: helper_dir.join("auth-account-history.json"),
+        fixture_usage_mode_history_file: helper_dir.join("usage-mode-history-fast-fixture.json"),
+        fast_candidate_sessions_dir: codex_home.join("fast-candidate-sessions"),
         codex_home,
     })
 }
@@ -418,6 +461,13 @@ fn resolve_case_args(case: &BenchCase, sandbox: &Sandbox) -> Vec<OsString> {
             "{codexHome}" => sandbox.codex_home.as_os_str().to_owned(),
             "{sessionsDir}" => sandbox.sessions_dir.as_os_str().to_owned(),
             "{accountHistoryFile}" => sandbox.account_history_file.as_os_str().to_owned(),
+            "{fixtureUsageModeHistoryFile}" => sandbox
+                .fixture_usage_mode_history_file
+                .as_os_str()
+                .to_owned(),
+            "{fastCandidateSessionsDir}" => {
+                sandbox.fast_candidate_sessions_dir.as_os_str().to_owned()
+            }
             value => OsString::from(value),
         })
         .collect()

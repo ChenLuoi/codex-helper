@@ -1,6 +1,8 @@
 use crate::error::AppError;
 use crate::format::{credits_to_usd, round_credits};
-use crate::pricing::{calculate_credit_cost, TokenUsage as PricingTokenUsage};
+use crate::pricing::{
+    calculate_credit_cost_with_context, PricingContext, TokenUsage as PricingTokenUsage,
+};
 use crate::stats::{UsageRateLimit, UsageRecord};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -726,12 +728,17 @@ fn usage_totals_for_targets(
 ) -> Vec<WindowUsageTotals> {
     let mut totals = vec![WindowUsageTotals::default(); targets.len()];
     for record in records {
-        let cost = calculate_credit_cost(
+        let cost = calculate_credit_cost_with_context(
             &record.model,
             PricingTokenUsage {
                 input_tokens: record.usage.input_tokens.max(0) as u64,
                 cached_input_tokens: record.usage.cached_input_tokens.max(0) as u64,
                 output_tokens: record.usage.output_tokens.max(0) as u64,
+            },
+            if record.usage_mode.is_fast() {
+                PricingContext::fast()
+            } else {
+                PricingContext::normal()
             },
         );
         for target_index in usage_target_indexes_for_record(record, targets) {
@@ -2359,6 +2366,7 @@ mod tests {
             timestamp: utc_time(2026, 5, 12, 0, 30),
             session_id: "usage-session".to_string(),
             model: "gpt-5.5".to_string(),
+            usage_mode: crate::stats::UsageMode::Normal,
             reasoning_effort: None,
             cwd: "/workspace/usage".to_string(),
             account_id: Some("account-fixture".to_string()),

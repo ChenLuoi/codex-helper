@@ -742,6 +742,7 @@ fn storage_options(options: &AuthCommandOptions) -> StorageOptions {
         auth_file: options.auth_file.clone(),
         profile_store_dir: options.store_dir.clone(),
         account_history_file: options.account_history_file.clone(),
+        usage_mode_history_file: None,
         sessions_dir: None,
     }
 }

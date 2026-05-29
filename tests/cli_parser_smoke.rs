@@ -15,6 +15,7 @@ fn help_is_generated_for_root_and_subcommands() {
             "Usage: codex-ops <command> [options]",
             "auth    Show and manage Codex authentication information",
             "limit   Show Codex server rate-limit telemetry",
+            "fast    Record local fast attribution and inspect fast candidates",
         ],
         &sandbox,
         "root help",
@@ -83,6 +84,47 @@ fn help_is_generated_for_root_and_subcommands() {
         "auth remove help",
     );
     assert_help(
+        &["fast", "--help"],
+        &[
+            "Usage: codex-ops fast <command> [options]",
+            "on          Record local fast attribution as on",
+            "candidates  Detect possible fast attribution periods",
+        ],
+        &sandbox,
+        "fast help",
+    );
+    assert_help(
+        &["fast", "on", "--help"],
+        &[
+            "Usage: codex-ops fast on [options]",
+            "--at <time>",
+            "--usage-mode-history-file <path>",
+        ],
+        &sandbox,
+        "fast on help",
+    );
+    assert_help(
+        &["fast", "status", "--help"],
+        &[
+            "Usage: codex-ops fast status [options]",
+            "--usage-mode-history-file <path>",
+            "-j, --json",
+        ],
+        &sandbox,
+        "fast status help",
+    );
+    assert_help(
+        &["fast", "candidates", "--help"],
+        &[
+            "Usage: codex-ops fast candidates [options]",
+            "--sessions-dir <path>",
+            "-A, --account-id <id>",
+            "-j, --json",
+        ],
+        &sandbox,
+        "fast candidates help",
+    );
+    assert_help(
         &["doctor", "--help"],
         &[
             "Usage: codex-ops doctor [options]",
@@ -107,6 +149,7 @@ fn help_is_generated_for_root_and_subcommands() {
             "-g, --group-by <group>",
             "--limit-window <window>",
             "server rate-limit windows",
+            "--usage-mode-history-file <path>",
             "-L, --last <duration>",
         ],
         &sandbox,
@@ -238,6 +281,40 @@ fn stat_limit_window_parser_contract_is_fixed() {
         &sandbox,
     );
     common::assert_success(&model_group, "stat limit window accepts model group");
+
+    let fast_candidates_window = run_codex_ops(["fast", "candidates", "--window", "5h"], &sandbox);
+    assert_failure_contains(
+        &fast_candidates_window,
+        2,
+        "unexpected argument '--window'",
+        "fast candidates rejects window option",
+    );
+
+    let fast_candidates_capacity =
+        run_codex_ops(["fast", "candidates", "--capacity", "100"], &sandbox);
+    assert_failure_contains(
+        &fast_candidates_capacity,
+        2,
+        "unexpected argument '--capacity'",
+        "fast candidates rejects capacity option",
+    );
+
+    let fast_candidates_auto_capacity =
+        run_codex_ops(["fast", "candidates", "--auto-capacity"], &sandbox);
+    assert_failure_contains(
+        &fast_candidates_auto_capacity,
+        2,
+        "unexpected argument '--auto-capacity'",
+        "fast candidates rejects auto-capacity option",
+    );
+
+    let old_stat_fast_candidates = run_codex_ops(["stat", "fast-candidates"], &sandbox);
+    assert_failure_contains(
+        &old_stat_fast_candidates,
+        2,
+        "codex-ops fast candidates",
+        "stat fast-candidates points to fast candidates",
+    );
 }
 
 #[test]
