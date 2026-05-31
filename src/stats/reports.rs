@@ -13,6 +13,7 @@ pub struct UsageRecordsReadOptions {
     pub sessions_dir: std::path::PathBuf,
     pub scan_all_files: bool,
     pub account_history_file: Option<std::path::PathBuf>,
+    pub usage_mode_history_file: Option<std::path::PathBuf>,
     pub account_id: Option<String>,
 }
 
@@ -103,6 +104,7 @@ pub struct UsageRecord {
     pub timestamp: DateTime<Utc>,
     pub session_id: String,
     pub model: String,
+    pub usage_mode: UsageMode,
     pub reasoning_effort: Option<String>,
     pub cwd: String,
     pub account_id: Option<String>,
@@ -120,11 +122,34 @@ pub struct UsageRateLimit {
     pub resets_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageMode {
+    Unknown,
+    Normal,
+    Fast,
+}
+
+impl UsageMode {
+    pub(super) fn from_fast(fast: Option<bool>) -> Self {
+        match fast {
+            Some(true) => Self::Fast,
+            Some(false) => Self::Normal,
+            None => Self::Unknown,
+        }
+    }
+
+    pub fn is_fast(self) -> bool {
+        self == Self::Fast
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct UsageRecordView<'a> {
     pub(super) timestamp: DateTime<Utc>,
     pub(super) session_id: &'a str,
     pub(super) model: &'a str,
+    pub(super) usage_mode: UsageMode,
     pub(super) reasoning_effort: Option<&'a str>,
     pub(super) cwd: &'a str,
     pub(super) account_id: Option<&'a str>,
@@ -139,6 +164,7 @@ impl UsageRecordView<'_> {
             timestamp: self.timestamp,
             session_id: self.session_id.to_string(),
             model: self.model.to_string(),
+            usage_mode: self.usage_mode,
             reasoning_effort: self.reasoning_effort.map(str::to_string),
             cwd: self.cwd.to_string(),
             account_id: self.account_id.map(str::to_string),
@@ -197,6 +223,8 @@ pub struct UsageDiagnostics {
     pub included_usage_events: i64,
     pub skipped_events: SkippedEvents,
     pub file_read_concurrency: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_history: Option<UsageModeHistoryDiagnostics>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -208,6 +236,17 @@ pub struct SkippedEvents {
     pub out_of_range: i64,
     pub account_mismatch: i64,
     pub fork_replay: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageModeHistoryDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_file: Option<String>,
+    pub history_present: bool,
+    pub switch_count: i64,
+    pub fast_attributed_calls: i64,
+    pub fast_attributed_credits: f64,
 }
 
 impl UsageDiagnostics {
@@ -233,6 +272,15 @@ impl UsageDiagnostics {
             included_usage_events: 0,
             skipped_events: SkippedEvents::default(),
             file_read_concurrency,
+            mode_history: None,
+        }
+    }
+
+    pub(super) fn record_fast_attribution(&mut self, calls: i64, credits: f64) {
+        if let Some(mode_history) = &mut self.mode_history {
+            mode_history.fast_attributed_calls += calls;
+            mode_history.fast_attributed_credits =
+                crate::format::round_credits(mode_history.fast_attributed_credits + credits);
         }
     }
 
@@ -359,6 +407,7 @@ pub(super) struct UsageSessionRow {
 pub(super) struct UsageSessionEventRow {
     pub(super) timestamp: DateTime<Utc>,
     pub(super) model: String,
+    pub(super) usage_mode: UsageMode,
     pub(super) reasoning_effort: Option<String>,
     pub(super) cwd: String,
     pub(super) usage: TokenUsage,
@@ -520,6 +569,7 @@ pub(super) struct UsageSessionDetailJson<'a> {
 pub(super) struct UsageSessionEventRowJson<'a> {
     timestamp: String,
     model: &'a str,
+    usage_mode: UsageMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
     cwd: &'a str,
@@ -641,6 +691,7 @@ fn to_session_event_row_json(row: &UsageSessionEventRow) -> UsageSessionEventRow
     UsageSessionEventRowJson {
         timestamp: iso_string(row.timestamp),
         model: &row.model,
+        usage_mode: row.usage_mode,
         reasoning_effort: row.reasoning_effort.as_deref(),
         cwd: &row.cwd,
         usage: &row.usage,

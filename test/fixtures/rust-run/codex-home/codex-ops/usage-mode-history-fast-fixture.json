@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "switches": [
+    {
+      "timestamp": "2026-05-10T00:00:00.000Z",
+      "fast": true,
+      "source": "fast on"
+    },
+    {
+      "timestamp": "2026-05-10T10:00:00.000Z",
+      "fast": false,
+      "source": "fast off"
+    }
+  ]
+}

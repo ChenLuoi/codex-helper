@@ -61,6 +61,11 @@ codex-ops auth select --account-id <account-id>
 codex-ops auth remove
 codex-ops auth remove --account-id <account-id> --yes
 codex-ops doctor
+codex-ops fast status
+codex-ops fast on --at 2026-05-10T09:00:00Z
+codex-ops fast off --at 2026-05-10T10:00:00Z
+codex-ops fast history
+codex-ops fast candidates --last 7d --json
 codex-ops stat
 codex-ops stat --start 2026-05-01 --end 2026-05-12 --group-by day
 codex-ops stat --group-by hour
@@ -81,6 +86,7 @@ codex-ops stat --limit-window 7d
 codex-ops stat --limit-window 5h --group-by model
 codex-ops stat --limit-window 7d --group-by account --format json
 codex-ops stat --verbose
+codex-ops stat --usage-mode-history-file ~/.codex/codex-ops/usage-mode-history.json
 codex-ops stat sessions --top 10
 codex-ops stat sessions --sort time --limit 10
 codex-ops stat sessions session-a --last 30d
@@ -172,6 +178,47 @@ Options:
 | `--sessions-dir <path>` | Use a specific sessions directory. |
 | `-j, --json` | Print JSON output. |
 
+### Usage Mode
+
+Syntax:
+
+```bash
+codex-ops fast status
+codex-ops fast on
+codex-ops fast off
+codex-ops fast history
+codex-ops fast candidates
+```
+
+`fast on/off/status/history` records local usage attribution only. It does not
+change Codex settings, does not call a network service, and does not turn any
+server-side mode on or off. The history file is used later by `stat` to price
+usage that happened while local fast attribution was on.
+
+By default the history file is
+`$CODEX_HOME/codex-ops/usage-mode-history.json`, or
+`~/.codex/codex-ops/usage-mode-history.json` when `CODEX_HOME` is not set. Use
+`--usage-mode-history-file` to read or write a different file.
+
+Examples:
+
+```bash
+codex-ops fast on
+codex-ops fast on --at 2026-05-10T09:00:00Z
+codex-ops fast off --at 2026-05-10T10:00:00Z
+codex-ops fast status --json
+codex-ops fast history
+codex-ops fast candidates --last 7d
+```
+
+Fast options:
+
+| Option | Behavior |
+| --- | --- |
+| `--at <time>` | Switch timestamp for `on` and `off`; omitted means now. |
+| `--usage-mode-history-file <path>` | Use a specific local usage mode history file. |
+| `-j, --json` | Print JSON output. |
+
 ### Stat
 
 Syntax:
@@ -234,10 +281,14 @@ Aggregation and shaping options:
 | `-F, --full-scan` | Scan all session files instead of pruning by date. |
 | `-r, --reasoning-effort` | When grouping by `model`, append Codex reasoning effort to the model key. |
 | `-A, --account-id <id>` | Only include usage attributed to an account id. |
+| `--usage-mode-history-file <path>` | Apply local fast attribution history when estimating credits and USD. |
 
 When `--reasoning-effort` is combined with `--group-by model`, Codex reasoning
 effort is appended when present, for example `gpt-5.5-high` or
-`gpt-5.5-xhigh`. Pricing still uses the base model name.
+`gpt-5.5-xhigh`. Fast-attributed usage is grouped under a distinct model key
+such as `gpt-5.5-fast`; with reasoning effort enabled this becomes
+`gpt-5.5-fast-high`. Pricing still uses the base model name plus the local
+usage mode.
 
 `stat --limit-window 5h|7d` joins token usage with observed server
 rate-limit windows from local JSONL. Without `--group-by`, it emits one row per
@@ -246,6 +297,38 @@ observed window. With `--group-by model|cwd|account`, it emits flat
 usage that cannot be placed in an observed window is reported in an
 `observed=false` unobserved row with diagnostics. Time groupings such as
 `hour`, `day`, `week`, and `month` are not valid with `--limit-window`.
+
+When a usage mode history is present, `stat` applies fast multipliers only from
+that local history. Token totals, call counts, session counts, and rate-limit
+percent values are unchanged. `--group-by model` displays fast-attributed calls
+separately, for example `gpt-5.5-fast`. The current fast multipliers are 2.0x
+credits for gpt-5.4 and 2.5x credits for gpt-5.5; other models default to 1.0x
+unless the embedded rate card defines another multiplier. Human-readable output
+and default JSON diagnostics do not print the history file path; verbose JSON
+diagnostics include it.
+
+`fast candidates` is read-only and detection-only. It never writes usage
+mode history and never runs `fast on` or `fast off` for you. It always
+uses the 5-hour (`5h`) rate-limit window and rejects `--limit-window`; there is
+no `--window`, `--capacity`, or `--auto-capacity` option for this view. The
+detector scores contiguous session segments within a rollout instead of single
+calls, so delayed or batched 5-hour usage-percent changes are evaluated against
+the segment's accumulated usage. A candidate segment must contain at least three
+usage calls and more than the minimum 1 percentage-point usage step. When
+multiple sessions are active in the same 5-hour interval, the observed
+`used_percent` delta is split across sessions by their normal-credit share
+before scoring. The output labels rows as candidates, includes confidence and
+reason fields, and prints manual `codex-ops fast on/off --at ...` command
+hints for review. Default output avoids full source file paths; verbose JSON can
+include file path evidence for debugging.
+
+Examples:
+
+```bash
+codex-ops stat --all --usage-mode-history-file ~/.codex/codex-ops/usage-mode-history.json
+codex-ops fast candidates --last 7d
+codex-ops fast candidates --start 2026-05-10T00:00:00Z --end 2026-05-10T04:00:00Z --json
+```
 
 Output options:
 
@@ -386,8 +469,8 @@ current snapshot source is OpenAI Help Center Codex rate card, checked
 
 | Model | Input / 1M | Cached input / 1M | Output / 1M | Note |
 | --- | ---: | ---: | ---: | --- |
-| GPT-5.5 | 125 credits | 12.50 credits | 750 credits |  |
-| GPT-5.4 | 62.50 credits | 6.250 credits | 375 credits |  |
+| GPT-5.5 | 125 credits | 12.50 credits | 750 credits | fast attribution multiplier 2.5x |
+| GPT-5.4 | 62.50 credits | 6.250 credits | 375 credits | fast attribution multiplier 2.0x |
 | GPT-5.4-mini | 18.75 credits | 1.875 credits | 113 credits |  |
 | GPT-5.3-Codex | 43.75 credits | 4.375 credits | 350 credits |  |
 | GPT-5.2 | 43.75 credits | 4.375 credits | 350 credits |  |

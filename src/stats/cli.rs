@@ -2,8 +2,10 @@ use super::accumulators::{
     LimitUsageAccumulator, LimitUsageAccumulatorConfig, UsageSessionDetailAccumulator,
     UsageSessionsAccumulator, UsageStatsAccumulator,
 };
+use super::fast_candidates::{build_fast_candidate_report, FastCandidateReport};
 use super::formatters::{
-    format_limit_usage, format_usage_session_detail, format_usage_sessions, format_usage_stats,
+    format_fast_candidates, format_limit_usage, format_usage_session_detail, format_usage_sessions,
+    format_usage_stats,
 };
 use super::reports::{
     LimitUsageGroupBy, LimitUsageReport, UsageRecordsReadOptions, UsageRecordsReport,
@@ -18,12 +20,14 @@ use crate::limits::{
     build_limit_windows_report, read_rate_limit_samples_report, LimitReportOptions,
     LimitWindowSelector, RateLimitSamplesReadOptions,
 };
+use crate::pricing::{calculate_credit_cost_with_context, PricingContext};
 use crate::storage::{
     normalize_optional_string, path_to_string, resolve_storage_paths, StorageOptions,
 };
 use crate::time::{self, RawRangeOptions, StatGroupBy};
+use crate::usage_mode_history::{self, UsageModeHistory};
 use chrono::{DateTime, Duration, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct StatCommandOptions {
@@ -36,6 +40,7 @@ pub struct StatCommandOptions {
     pub sessions_dir: Option<PathBuf>,
     pub auth_file: Option<PathBuf>,
     pub account_history_file: Option<PathBuf>,
+    pub usage_mode_history_file: Option<PathBuf>,
     pub today: bool,
     pub yesterday: bool,
     pub month: bool,
@@ -62,6 +67,7 @@ pub(super) struct ResolvedStatOptions {
     pub(super) format: StatFormat,
     pub(super) sessions_dir: PathBuf,
     pub(super) account_history_file: Option<PathBuf>,
+    pub(super) usage_mode_history_file: Option<PathBuf>,
     pub(super) sort_by: Option<StatSort>,
     pub(super) limit: Option<usize>,
     pub(super) include_reasoning_effort: bool,
@@ -69,6 +75,10 @@ pub(super) struct ResolvedStatOptions {
     pub(super) verbose: bool,
     pub(super) account_id: Option<String>,
     pub(super) account_history: Option<UsageAccountHistory>,
+    pub(super) usage_mode_history: Option<UsageModeHistory>,
+    pub(super) usage_mode_history_present: bool,
+    pub(super) usage_mode_history_switch_count: i64,
+    pub(super) usage_mode_history_include_path: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +88,18 @@ pub struct ResolvedStatRangeOptions {
     pub format: StatFormat,
     pub sessions_dir: PathBuf,
     pub verbose: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedFastCandidateOptions {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    format: StatFormat,
+    sessions_dir: PathBuf,
+    account_history_file: Option<PathBuf>,
+    scan_all_files: bool,
+    verbose: bool,
+    account_id: Option<String>,
 }
 
 pub fn resolve_stat_range_options_from_raw(
@@ -104,6 +126,7 @@ pub fn resolve_stat_range_options_from_raw(
         auth_file: raw.auth_file.clone(),
         profile_store_dir: None,
         account_history_file: raw.account_history_file.clone(),
+        usage_mode_history_file: raw.usage_mode_history_file.clone(),
         sessions_dir: raw.sessions_dir.clone(),
     });
 
@@ -123,6 +146,11 @@ pub fn read_usage_records_report(
         Some(path) => account_history::read_optional_usage_account_history(path)?,
         None => None,
     };
+    let (usage_mode_history, usage_mode_history_present, usage_mode_history_switch_count) =
+        match &options.usage_mode_history_file {
+            Some(path) => read_usage_mode_history_summary(path)?,
+            None => (None, false, 0),
+        };
     let mut records = Vec::new();
     let resolved = ResolvedStatOptions {
         start: options.start,
@@ -133,6 +161,7 @@ pub fn read_usage_records_report(
         format: StatFormat::Json,
         sessions_dir: options.sessions_dir.clone(),
         account_history_file: options.account_history_file.clone(),
+        usage_mode_history_file: options.usage_mode_history_file.clone(),
         sort_by: None,
         limit: None,
         include_reasoning_effort: false,
@@ -140,9 +169,26 @@ pub fn read_usage_records_report(
         verbose: false,
         account_id: options.account_id.clone(),
         account_history,
+        usage_mode_history,
+        usage_mode_history_present,
+        usage_mode_history_switch_count,
+        usage_mode_history_include_path: false,
     };
-    let diagnostics =
-        process_usage_records(&resolved, |record| records.push(record.to_owned_record()))?;
+    let mut fast_attributed_calls = 0_i64;
+    let mut fast_attributed_credits = 0.0;
+    let mut diagnostics = process_usage_records(&resolved, |record| {
+        if record.usage_mode.is_fast() {
+            let cost = calculate_credit_cost_with_context(
+                record.model,
+                record.usage.pricing_usage(),
+                PricingContext::fast(),
+            );
+            fast_attributed_calls += 1;
+            fast_attributed_credits += cost.credits;
+        }
+        records.push(record.to_owned_record());
+    })?;
+    diagnostics.record_fast_attribution(fast_attributed_calls, fast_attributed_credits);
 
     Ok(UsageRecordsReport {
         start: options.start,
@@ -151,6 +197,16 @@ pub fn read_usage_records_report(
         records,
         diagnostics,
     })
+}
+
+fn read_usage_mode_history_summary(
+    path: &Path,
+) -> Result<(Option<UsageModeHistory>, bool, i64), AppError> {
+    let store = usage_mode_history::read_usage_mode_history_store(path)?;
+    let history_present = store.default_mode.is_some() || !store.switches.is_empty();
+    let switch_count = store.switches.len() as i64;
+    let history = usage_mode_history::usage_mode_history_from_store(store)?;
+    Ok((history, history_present, switch_count))
 }
 
 pub fn run_stat_command(
@@ -197,8 +253,26 @@ pub fn run_stat_command(
                 format_usage_sessions(&report, resolved.format, resolved.verbose)
             }
         }
+        Some("fast-candidates") => Err(AppError::invalid_input(
+            "fast candidate detection moved to: codex-ops fast candidates.",
+        )),
         Some(other) => Err(AppError::new(format!("Unknown stat view: {other}"))),
     }
+}
+
+pub fn run_fast_candidates_command(
+    options: StatCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<String, AppError> {
+    if options.limit_window.is_some() {
+        return Err(AppError::invalid_input(
+            "fast candidates always uses the 5h rate-limit window and does not accept --limit-window.",
+        ));
+    }
+
+    let resolved = resolve_fast_candidate_options(&options, now)?;
+    let report = read_fast_candidate_report(&resolved)?;
+    format_fast_candidates(&report, resolved.format, resolved.verbose)
 }
 
 fn raw_range_options(raw: &StatCommandOptions) -> RawRangeOptions {
@@ -262,6 +336,7 @@ fn resolve_stat_options(
         auth_file: raw.auth_file.clone(),
         profile_store_dir: None,
         account_history_file: raw.account_history_file.clone(),
+        usage_mode_history_file: raw.usage_mode_history_file.clone(),
         sessions_dir: raw.sessions_dir.clone(),
     });
     let account_id = normalize_optional_string(raw.account_id.as_deref());
@@ -282,6 +357,8 @@ fn resolve_stat_options(
     } else {
         None
     };
+    let (usage_mode_history, usage_mode_history_present, usage_mode_history_switch_count) =
+        read_usage_mode_history_summary(&paths.usage_mode_history_file)?;
 
     Ok(ResolvedStatOptions {
         start: range.start,
@@ -292,6 +369,7 @@ fn resolve_stat_options(
         format,
         sessions_dir: paths.sessions_dir,
         account_history_file: Some(paths.account_history_file),
+        usage_mode_history_file: Some(paths.usage_mode_history_file),
         sort_by,
         limit,
         include_reasoning_effort: raw.reasoning_effort,
@@ -299,6 +377,10 @@ fn resolve_stat_options(
         verbose: raw.verbose,
         account_id,
         account_history,
+        usage_mode_history,
+        usage_mode_history_present,
+        usage_mode_history_switch_count,
+        usage_mode_history_include_path: raw.verbose && format == StatFormat::Json,
     })
 }
 
@@ -311,6 +393,86 @@ fn validate_limit_window_group_by(group_by: Option<StatGroupBy>) -> Result<(), A
         }
         Some(StatGroupBy::Model | StatGroupBy::Cwd | StatGroupBy::Account) | None => Ok(()),
     }
+}
+
+fn resolve_fast_candidate_options(
+    raw: &StatCommandOptions,
+    now: DateTime<Utc>,
+) -> Result<ResolvedFastCandidateOptions, AppError> {
+    let format = if raw.json {
+        StatFormat::Json
+    } else {
+        match raw.format.as_deref() {
+            Some(value) => StatFormat::parse(value)?,
+            None => StatFormat::Table,
+        }
+    };
+    let range_options = raw_range_options(raw);
+    let range = time::resolve_date_range(&range_options, now)?;
+    if range.start > range.end {
+        return Err(AppError::new(
+            "The stat start time must be earlier than or equal to the end time.",
+        ));
+    }
+
+    let paths = resolve_storage_paths(&StorageOptions {
+        codex_home: raw.codex_home.clone(),
+        auth_file: raw.auth_file.clone(),
+        profile_store_dir: None,
+        account_history_file: raw.account_history_file.clone(),
+        usage_mode_history_file: raw.usage_mode_history_file.clone(),
+        sessions_dir: raw.sessions_dir.clone(),
+    });
+    let account_id = normalize_optional_string(raw.account_id.as_deref());
+    if account_id.is_some() {
+        ensure_usage_account_history(
+            &paths.account_history_file,
+            &AuthCommandOptions {
+                auth_file: raw.auth_file.clone(),
+                codex_home: raw.codex_home.clone(),
+                store_dir: None,
+                account_history_file: raw.account_history_file.clone(),
+            },
+            now,
+        )?;
+    }
+
+    Ok(ResolvedFastCandidateOptions {
+        start: range.start,
+        end: range.end,
+        format,
+        sessions_dir: paths.sessions_dir,
+        account_history_file: Some(paths.account_history_file),
+        scan_all_files: raw.full_scan,
+        verbose: raw.verbose,
+        account_id,
+    })
+}
+
+fn read_fast_candidate_report(
+    options: &ResolvedFastCandidateOptions,
+) -> Result<FastCandidateReport, AppError> {
+    let samples = read_rate_limit_samples_report(&RateLimitSamplesReadOptions {
+        start: options.start,
+        end: options.end,
+        sessions_dir: options.sessions_dir.clone(),
+        scan_all_files: options.scan_all_files,
+        account_history_file: options.account_history_file.clone(),
+        account_id: options.account_id.clone(),
+        plan_type: None,
+        window_minutes: Some(LimitWindowSelector::FiveHours.window_minutes()),
+    })?;
+    let usage = read_usage_records_report(&UsageRecordsReadOptions {
+        start: options.start,
+        end: options.end,
+        sessions_dir: options.sessions_dir.clone(),
+        scan_all_files: options.scan_all_files,
+        account_history_file: options.account_history_file.clone(),
+        usage_mode_history_file: None,
+        account_id: options.account_id.clone(),
+    })?;
+
+    Ok(build_fast_candidate_report(&samples, &usage))
 }
 
 fn read_limit_usage_stats(options: &ResolvedStatOptions) -> Result<LimitUsageReport, AppError> {

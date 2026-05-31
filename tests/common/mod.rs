@@ -26,6 +26,9 @@ pub struct Sandbox {
     pub sessions_dir: PathBuf,
     pub store_dir: PathBuf,
     pub account_history_file: PathBuf,
+    pub usage_mode_history_file: PathBuf,
+    pub fixture_usage_mode_history_file: PathBuf,
+    pub fast_candidate_sessions_dir: PathBuf,
 }
 
 impl Sandbox {
@@ -48,6 +51,10 @@ impl Sandbox {
             sessions_dir: codex_home.join("sessions"),
             store_dir: helper_dir.join("auth-profiles"),
             account_history_file: helper_dir.join("auth-account-history.json"),
+            usage_mode_history_file: helper_dir.join("usage-mode-history.json"),
+            fixture_usage_mode_history_file: helper_dir
+                .join("usage-mode-history-fast-fixture.json"),
+            fast_candidate_sessions_dir: codex_home.join("fast-candidate-sessions"),
             codex_home,
         }
     }
@@ -373,6 +380,74 @@ pub fn assert_limit_usage_diagnostics_schema(value: &Value, label: &str) {
     );
     assert_usage_diagnostics_schema(&value["usage"], &format!("{label} usage"));
     assert_limit_diagnostics_schema(&value["rateLimits"], &format!("{label} rate limits"));
+}
+
+pub fn assert_fast_candidates_report_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "detectionOnly",
+            "window",
+            "start",
+            "end",
+            "sessionsDir",
+            "warnings",
+            "candidates",
+            "diagnostics",
+        ],
+        label,
+    );
+    assert_has_keys(
+        &value["diagnostics"],
+        &[
+            "noFiveHourSamples",
+            "fiveHourSamples",
+            "samplePairs",
+            "activeSamplePairs",
+            "risingSamplePairs",
+            "exactUsageMatches",
+            "legacyUsageMatches",
+            "ambiguousLegacyUsageRecords",
+            "segmentsWithUsage",
+            "candidateSegments",
+            "normalSegments",
+            "insufficientSegments",
+            "mixedModelSegments",
+            "reasonCounts",
+        ],
+        &format!("{label} diagnostics"),
+    );
+}
+
+pub fn assert_fast_candidate_row_schema(value: &Value, label: &str) {
+    assert_has_keys(
+        value,
+        &[
+            "timestamp",
+            "segmentStart",
+            "segmentEnd",
+            "sessionId",
+            "model",
+            "accountId",
+            "planType",
+            "limitId",
+            "resetsAt",
+            "samplePairs",
+            "calls",
+            "totalTokens",
+            "deltaUsedPercent",
+            "normalCredits",
+            "percentPerCredit",
+            "baselinePercentPerCredit",
+            "effectiveMultiplier",
+            "expectedFastMultiplier",
+            "confidence",
+            "reason",
+            "suggestedFastOnCommand",
+            "suggestedFastOffCommand",
+        ],
+        label,
+    );
 }
 
 pub fn assert_limit_sample_schema(value: &Value, label: &str) {

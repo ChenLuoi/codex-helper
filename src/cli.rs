@@ -14,6 +14,12 @@ const AUTH_SELECT_USAGE: &str = "codex-ops auth select [options]";
 const AUTH_REMOVE_USAGE: &str = "codex-ops auth remove [options]";
 const DOCTOR_USAGE: &str = "codex-ops doctor [options]";
 const LIMIT_USAGE: &str = "codex-ops limit <command> [options]";
+const FAST_USAGE: &str = "codex-ops fast <command> [options]";
+const FAST_ON_USAGE: &str = "codex-ops fast on [options]";
+const FAST_OFF_USAGE: &str = "codex-ops fast off [options]";
+const FAST_STATUS_USAGE: &str = "codex-ops fast status [options]";
+const FAST_HISTORY_USAGE: &str = "codex-ops fast history [options]";
+const FAST_CANDIDATES_USAGE: &str = "codex-ops fast candidates [options]";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ParsedCli {
@@ -28,6 +34,7 @@ pub enum CliCommand {
     Doctor(DoctorCliCommand),
     Stat(StatCliCommand),
     Limit(LimitCliCommand),
+    Fast(FastCliCommand),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -55,6 +62,22 @@ pub struct StatCliCommand {
 pub struct LimitCliCommand {
     pub command: LimitCommand,
     pub options: LimitCommandOptions,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum FastCliCommand {
+    On(FastCliOptions),
+    Off(FastCliOptions),
+    Status(FastCliOptions),
+    History(FastCliOptions),
+    Candidates(Box<StatCommandOptions>),
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct FastCliOptions {
+    pub usage_mode_history_file: Option<PathBuf>,
+    pub at: Option<String>,
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -156,6 +179,11 @@ enum RootCommand {
         override_usage = LIMIT_USAGE
     )]
     Limit(LimitArgs),
+    #[command(
+        about = "Record local fast attribution and inspect fast candidates",
+        override_usage = FAST_USAGE
+    )]
+    Fast(FastArgs),
 }
 
 #[derive(Debug, Args)]
@@ -271,7 +299,7 @@ struct DoctorArgs {
 
 #[derive(Debug, Args)]
 struct StatArgs {
-    #[arg(value_name = "view")]
+    #[arg(value_name = "view", help = "Optional view: sessions")]
     view: Option<String>,
     #[arg(value_name = "session")]
     session: Option<String>,
@@ -329,6 +357,8 @@ struct StatOptionArgs {
     auth_file: Option<PathBuf>,
     #[arg(long, value_name = "path", help = "Auth account history file")]
     account_history_file: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Usage mode history file")]
+    usage_mode_history_file: Option<PathBuf>,
     #[arg(long, value_name = "path", help = "Codex home directory")]
     codex_home: Option<PathBuf>,
     #[arg(long, value_name = "path", help = "Codex sessions directory")]
@@ -367,6 +397,115 @@ struct StatOptionArgs {
 struct LimitArgs {
     #[command(subcommand)]
     command: Option<LimitSubcommand>,
+}
+
+#[derive(Debug, Args)]
+struct FastArgs {
+    #[command(subcommand)]
+    command: Option<FastSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum FastSubcommand {
+    #[command(
+        about = "Record local fast attribution as on",
+        override_usage = FAST_ON_USAGE
+    )]
+    On(FastWriteArgs),
+    #[command(
+        about = "Record local fast attribution as off",
+        override_usage = FAST_OFF_USAGE
+    )]
+    Off(FastWriteArgs),
+    #[command(
+        about = "Show current local fast attribution",
+        override_usage = FAST_STATUS_USAGE
+    )]
+    Status(FastReadArgs),
+    #[command(
+        about = "List local fast attribution history",
+        override_usage = FAST_HISTORY_USAGE
+    )]
+    History(FastReadArgs),
+    #[command(
+        about = "Detect possible fast attribution periods",
+        override_usage = FAST_CANDIDATES_USAGE,
+        alias = "candidate"
+    )]
+    Candidates(FastCandidatesArgs),
+}
+
+#[derive(Debug, Args)]
+struct FastWriteArgs {
+    #[arg(long, value_name = "time", help = "Switch timestamp")]
+    at: Option<String>,
+    #[command(flatten)]
+    common: FastCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct FastReadArgs {
+    #[command(flatten)]
+    common: FastCommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct FastCommonArgs {
+    #[arg(long, value_name = "path", help = "Usage mode history file")]
+    usage_mode_history_file: Option<PathBuf>,
+    #[arg(short = 'j', long, help = "Print JSON")]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct FastCandidatesArgs {
+    #[arg(short = 's', long, value_name = "time", help = "Start time")]
+    start: Option<String>,
+    #[arg(short = 'e', long, value_name = "time", help = "End time")]
+    end: Option<String>,
+    #[arg(short = 'a', long, help = "Include all session usage")]
+    all: bool,
+    #[arg(short = 't', long, help = "Use today as the range")]
+    today: bool,
+    #[arg(long, help = "Use yesterday as the range")]
+    yesterday: bool,
+    #[arg(short = 'm', long, help = "Use the current calendar month")]
+    month: bool,
+    #[arg(
+        short = 'L',
+        long,
+        value_name = "duration",
+        help = "Recent duration such as 12h, 7d, 2w, 1mo"
+    )]
+    last: Option<String>,
+    #[arg(short = 'F', long, help = "Scan all session files")]
+    full_scan: bool,
+    #[arg(
+        short = 'A',
+        long,
+        value_name = "id",
+        help = "Only include one account id"
+    )]
+    account_id: Option<String>,
+    #[arg(long, value_name = "path", help = "Path to auth.json")]
+    auth_file: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Auth account history file")]
+    account_history_file: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Codex home directory")]
+    codex_home: Option<PathBuf>,
+    #[arg(long, value_name = "path", help = "Codex sessions directory")]
+    sessions_dir: Option<PathBuf>,
+    #[arg(
+        short = 'f',
+        long,
+        value_name = "format",
+        help = "table, json, csv, markdown"
+    )]
+    format: Option<String>,
+    #[arg(short = 'j', long, help = "Print JSON")]
+    json: bool,
+    #[arg(short = 'v', long, help = "Show diagnostics")]
+    verbose: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -509,6 +648,7 @@ impl CliArgs {
                 Ok(parsed_command(CliCommand::Stat(stat_command(args)?)))
             }
             Some(RootCommand::Limit(args)) => limit_command(args),
+            Some(RootCommand::Fast(args)) => fast_command(args),
         }
     }
 }
@@ -594,6 +734,7 @@ fn stat_options(args: StatOptionArgs) -> Result<StatCommandOptions, CliParseErro
         sessions_dir: args.sessions_dir,
         auth_file: resolve_cli_path(args.auth_file)?,
         account_history_file: resolve_cli_path(args.account_history_file)?,
+        usage_mode_history_file: resolve_cli_path(args.usage_mode_history_file)?,
         today: args.today,
         yesterday: args.yesterday,
         month: args.month,
@@ -637,6 +778,66 @@ fn limit_command(args: LimitArgs) -> Result<ParsedCli, CliParseError> {
     };
 
     Ok(parsed_command(CliCommand::Limit(command)))
+}
+
+fn fast_command(args: FastArgs) -> Result<ParsedCli, CliParseError> {
+    let command = match args.command {
+        None => return Ok(ParsedCli::Help(fast_help())),
+        Some(FastSubcommand::On(args)) => FastCliCommand::On(fast_write_options(args)?),
+        Some(FastSubcommand::Off(args)) => FastCliCommand::Off(fast_write_options(args)?),
+        Some(FastSubcommand::Status(args)) => FastCliCommand::Status(fast_read_options(args)?),
+        Some(FastSubcommand::History(args)) => FastCliCommand::History(fast_read_options(args)?),
+        Some(FastSubcommand::Candidates(args)) => {
+            FastCliCommand::Candidates(Box::new(fast_candidates_options(args)?))
+        }
+    };
+
+    Ok(parsed_command(CliCommand::Fast(command)))
+}
+
+fn fast_write_options(args: FastWriteArgs) -> Result<FastCliOptions, CliParseError> {
+    Ok(FastCliOptions {
+        usage_mode_history_file: resolve_cli_path(args.common.usage_mode_history_file)?,
+        at: args.at,
+        json: args.common.json,
+    })
+}
+
+fn fast_read_options(args: FastReadArgs) -> Result<FastCliOptions, CliParseError> {
+    Ok(FastCliOptions {
+        usage_mode_history_file: resolve_cli_path(args.common.usage_mode_history_file)?,
+        at: None,
+        json: args.common.json,
+    })
+}
+
+fn fast_candidates_options(args: FastCandidatesArgs) -> Result<StatCommandOptions, CliParseError> {
+    Ok(StatCommandOptions {
+        start: args.start,
+        end: args.end,
+        group_by: None,
+        limit_window: None,
+        format: args.format,
+        codex_home: args.codex_home,
+        sessions_dir: args.sessions_dir,
+        auth_file: resolve_cli_path(args.auth_file)?,
+        account_history_file: resolve_cli_path(args.account_history_file)?,
+        usage_mode_history_file: None,
+        today: args.today,
+        yesterday: args.yesterday,
+        month: args.month,
+        all: args.all,
+        reasoning_effort: false,
+        account_id: args.account_id,
+        last: args.last,
+        sort: None,
+        limit: None,
+        top: None,
+        detail: false,
+        full_scan: args.full_scan,
+        verbose: args.verbose,
+        json: args.json,
+    })
 }
 
 fn limit_current_options(args: LimitCurrentArgs) -> Result<LimitCommandOptions, CliParseError> {
@@ -713,6 +914,14 @@ fn limit_help() -> String {
     limit.render_help().to_string()
 }
 
+fn fast_help() -> String {
+    let mut command = CliArgs::command();
+    let fast = command
+        .find_subcommand_mut("fast")
+        .expect("fast subcommand is defined");
+    fast.render_help().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,23 +952,23 @@ mod tests {
     #[test]
     fn resolves_path_options_from_equals_flags() {
         let args = vec![
-            "limit".to_string(),
-            "samples".to_string(),
-            "--account-history-file=fixtures/history.json".to_string(),
+            "fast".to_string(),
+            "status".to_string(),
+            "--usage-mode-history-file=fixtures/mode-history.json".to_string(),
         ];
 
         let parsed = parse_cli(&args).expect("parse cli");
         let ParsedCli::Command(command) = parsed else {
             panic!("expected command");
         };
-        let CliCommand::Limit(LimitCliCommand { options, .. }) = *command else {
-            panic!("expected limit samples");
+        let CliCommand::Fast(FastCliCommand::Status(options)) = *command else {
+            panic!("expected fast status");
         };
         let cwd = env::current_dir().expect("cwd");
 
         assert_eq!(
-            options.account_history_file,
-            Some(cwd.join("fixtures/history.json"))
+            options.usage_mode_history_file,
+            Some(cwd.join("fixtures/mode-history.json"))
         );
     }
 }

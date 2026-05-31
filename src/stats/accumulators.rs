@@ -1,13 +1,15 @@
 use super::reports::{
     LimitUsageDiagnostics, LimitUsageGroupBy, LimitUsageReport, LimitUsageRow, TokenUsage,
-    UsageDiagnostics, UsageRecordView, UsageSessionDetailReport, UsageSessionEventRow,
+    UsageDiagnostics, UsageMode, UsageRecordView, UsageSessionDetailReport, UsageSessionEventRow,
     UsageSessionRow, UsageSessionsReport, UsageStatRow, UsageStatsReport, UsageUnpricedModelRow,
 };
 use super::scan::UsageRecordAccumulator;
 use super::StatSort;
 use crate::format::{credits_to_usd, round_credits};
 use crate::limits::{LimitWindow, LimitWindowSelector, RateLimitDiagnostics};
-use crate::pricing::{calculate_credit_cost, normalize_model_name};
+use crate::pricing::{
+    calculate_credit_cost_with_context, normalize_model_name, CreditCost, PricingContext,
+};
 use crate::time::StatGroupBy;
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use std::cmp::Ordering;
@@ -71,6 +73,8 @@ pub(super) struct UsageStatsAccumulator {
     totals: TokenUsage,
     calls: i64,
     unpriced_models: HashMap<String, UsageUnpricedModelRow>,
+    fast_attributed_calls: i64,
+    fast_attributed_credits: f64,
 }
 
 impl UsageStatsAccumulator {
@@ -96,13 +100,21 @@ impl UsageStatsAccumulator {
             totals: TokenUsage::default(),
             calls: 0,
             unpriced_models: HashMap::new(),
+            fast_attributed_calls: 0,
+            fast_attributed_credits: 0.0,
         }
     }
 
     pub(super) fn add(&mut self, record: UsageRecordView<'_>) {
         let key = group_key(&record, self.group_by, self.include_reasoning_effort);
         let row = self.rows.entry(key).or_default();
-        let cost = calculate_credit_cost(record.model, record.usage.pricing_usage());
+        let cost = record_credit_cost(&record);
+        add_fast_attribution(
+            &mut self.fast_attributed_calls,
+            &mut self.fast_attributed_credits,
+            &record,
+            &cost,
+        );
 
         if !row.sessions.contains(record.session_id) {
             row.sessions.insert(record.session_id.to_string());
@@ -176,7 +188,11 @@ impl UsageStatsAccumulator {
                 unpriced_calls: total_unpriced_calls,
             },
             unpriced_models: format_unpriced_models(self.unpriced_models),
-            diagnostics,
+            diagnostics: finish_usage_diagnostics(
+                diagnostics,
+                self.fast_attributed_calls,
+                self.fast_attributed_credits,
+            ),
         }
     }
 }
@@ -213,6 +229,8 @@ impl UsageRecordAccumulator for UsageStatsAccumulator {
         self.totals.add(&other.totals);
         self.calls += other.calls;
         merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
+        self.fast_attributed_calls += other.fast_attributed_calls;
+        self.fast_attributed_credits += other.fast_attributed_credits;
     }
 }
 
@@ -235,6 +253,8 @@ pub(super) struct LimitUsageAccumulator {
     unpriced_calls: i64,
     unpriced_models: HashMap<String, UsageUnpricedModelRow>,
     unobserved_usage_events: i64,
+    fast_attributed_calls: i64,
+    fast_attributed_credits: f64,
 }
 
 pub(super) struct LimitUsageAccumulatorConfig {
@@ -289,6 +309,8 @@ impl LimitUsageAccumulator {
             unpriced_calls: 0,
             unpriced_models: HashMap::new(),
             unobserved_usage_events: 0,
+            fast_attributed_calls: 0,
+            fast_attributed_credits: 0.0,
         }
     }
 
@@ -308,7 +330,13 @@ impl LimitUsageAccumulator {
         let row = self.rows.entry(row_key).or_insert_with(|| {
             mutable_limit_usage_row(self.selector, self.group_by, window.as_ref(), group_key)
         });
-        let cost = calculate_credit_cost(record.model, record.usage.pricing_usage());
+        let cost = record_credit_cost(&record);
+        add_fast_attribution(
+            &mut self.fast_attributed_calls,
+            &mut self.fast_attributed_credits,
+            &record,
+            &cost,
+        );
 
         row.sessions.insert(record.session_id.to_string());
         row.calls += 1;
@@ -369,6 +397,10 @@ impl LimitUsageAccumulator {
         if let Some(limit) = self.limit {
             rows.truncate(limit);
         }
+
+        let mut usage_diagnostics = usage_diagnostics;
+        usage_diagnostics
+            .record_fast_attribution(self.fast_attributed_calls, self.fast_attributed_credits);
 
         let diagnostics = LimitUsageDiagnostics {
             observed_windows: self.windows.len() as i64,
@@ -487,6 +519,8 @@ impl UsageRecordAccumulator for LimitUsageAccumulator {
         self.unpriced_calls += other.unpriced_calls;
         merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
         self.unobserved_usage_events += other.unobserved_usage_events;
+        self.fast_attributed_calls += other.fast_attributed_calls;
+        self.fast_attributed_credits += other.fast_attributed_credits;
     }
 }
 
@@ -500,6 +534,8 @@ pub(super) struct UsageSessionsAccumulator {
     totals: TokenUsage,
     calls: i64,
     unpriced_models: HashMap<String, UsageUnpricedModelRow>,
+    fast_attributed_calls: i64,
+    fast_attributed_credits: f64,
 }
 
 impl UsageSessionsAccumulator {
@@ -520,6 +556,8 @@ impl UsageSessionsAccumulator {
             totals: TokenUsage::default(),
             calls: 0,
             unpriced_models: HashMap::new(),
+            fast_attributed_calls: 0,
+            fast_attributed_credits: 0.0,
         }
     }
 
@@ -549,7 +587,13 @@ impl UsageSessionsAccumulator {
                 .get_mut(record.session_id)
                 .expect("session was inserted above")
         };
-        let cost = calculate_credit_cost(record.model, record.usage.pricing_usage());
+        let cost = record_credit_cost(&record);
+        add_fast_attribution(
+            &mut self.fast_attributed_calls,
+            &mut self.fast_attributed_credits,
+            &record,
+            &cost,
+        );
 
         if record.model != "unknown" && session.model != record.model {
             session.model = record.model.to_string();
@@ -638,7 +682,11 @@ impl UsageSessionsAccumulator {
                 unpriced_calls: total_unpriced_calls,
             },
             unpriced_models: format_unpriced_models(self.unpriced_models),
-            diagnostics,
+            diagnostics: finish_usage_diagnostics(
+                diagnostics,
+                self.fast_attributed_calls,
+                self.fast_attributed_credits,
+            ),
         }
     }
 }
@@ -670,6 +718,8 @@ impl UsageRecordAccumulator for UsageSessionsAccumulator {
         self.totals.add(&other.totals);
         self.calls += other.calls;
         merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
+        self.fast_attributed_calls += other.fast_attributed_calls;
+        self.fast_attributed_credits += other.fast_attributed_credits;
     }
 }
 
@@ -687,6 +737,8 @@ pub(super) struct UsageSessionDetailAccumulator {
     priced_calls: i64,
     unpriced_calls: i64,
     unpriced_models: HashMap<String, UsageUnpricedModelRow>,
+    fast_attributed_calls: i64,
+    fast_attributed_credits: f64,
 }
 
 impl UsageSessionDetailAccumulator {
@@ -711,6 +763,8 @@ impl UsageSessionDetailAccumulator {
             priced_calls: 0,
             unpriced_calls: 0,
             unpriced_models: HashMap::new(),
+            fast_attributed_calls: 0,
+            fast_attributed_credits: 0.0,
         }
     }
 
@@ -719,7 +773,13 @@ impl UsageSessionDetailAccumulator {
             return;
         }
 
-        let cost = calculate_credit_cost(record.model, record.usage.pricing_usage());
+        let cost = record_credit_cost(&record);
+        add_fast_attribution(
+            &mut self.fast_attributed_calls,
+            &mut self.fast_attributed_credits,
+            &record,
+            &cost,
+        );
         let summary = self.summary.get_or_insert_with(|| MutableSession {
             session_id: record.session_id.to_string(),
             model: record.model.to_string(),
@@ -777,6 +837,7 @@ impl UsageSessionDetailAccumulator {
         self.rows.push(UsageSessionEventRow {
             timestamp: record.timestamp,
             model: record.model.to_string(),
+            usage_mode: record.usage_mode,
             reasoning_effort: record.reasoning_effort.map(str::to_string),
             cwd: record.cwd.to_string(),
             usage: record.usage.clone(),
@@ -802,7 +863,7 @@ impl UsageSessionDetailAccumulator {
             Some(limit) => all_rows.iter().take(limit).cloned().collect(),
             None => all_rows.clone(),
         };
-        let by_model = build_session_event_breakdown(&all_rows, |row| row.model.clone());
+        let by_model = build_session_event_breakdown(&all_rows, session_event_model_group_key);
         let by_cwd = build_session_event_breakdown(&all_rows, |row| row.cwd.clone());
         let by_reasoning_effort = build_session_event_breakdown(&all_rows, |row| {
             row.reasoning_effort
@@ -853,7 +914,11 @@ impl UsageSessionDetailAccumulator {
                 unpriced_calls: self.unpriced_calls,
             },
             unpriced_models: format_unpriced_models(self.unpriced_models),
-            diagnostics,
+            diagnostics: finish_usage_diagnostics(
+                diagnostics,
+                self.fast_attributed_calls,
+                self.fast_attributed_credits,
+            ),
         }
     }
 }
@@ -889,6 +954,8 @@ impl UsageRecordAccumulator for UsageSessionDetailAccumulator {
         self.priced_calls += other.priced_calls;
         self.unpriced_calls += other.unpriced_calls;
         merge_unpriced_models(&mut self.unpriced_models, other.unpriced_models);
+        self.fast_attributed_calls += other.fast_attributed_calls;
+        self.fast_attributed_credits += other.fast_attributed_credits;
     }
 }
 
@@ -1039,19 +1106,45 @@ fn merge_mutable_limit_usage_row(row: &mut MutableLimitUsageRow, other: MutableL
     row.unpriced_calls += other.unpriced_calls;
 }
 
+fn record_credit_cost(record: &UsageRecordView<'_>) -> CreditCost {
+    let context = if record.usage_mode.is_fast() {
+        PricingContext::fast()
+    } else {
+        PricingContext::normal()
+    };
+    calculate_credit_cost_with_context(record.model, record.usage.pricing_usage(), context)
+}
+
+fn add_fast_attribution(
+    calls: &mut i64,
+    credits: &mut f64,
+    record: &UsageRecordView<'_>,
+    cost: &CreditCost,
+) {
+    if record.usage_mode.is_fast() {
+        *calls += 1;
+        *credits += cost.credits;
+    }
+}
+
+fn finish_usage_diagnostics(
+    mut diagnostics: Option<UsageDiagnostics>,
+    fast_attributed_calls: i64,
+    fast_attributed_credits: f64,
+) -> Option<UsageDiagnostics> {
+    if let Some(diagnostics) = &mut diagnostics {
+        diagnostics.record_fast_attribution(fast_attributed_calls, fast_attributed_credits);
+    }
+    diagnostics
+}
+
 fn group_key(
     record: &UsageRecordView<'_>,
     group_by: StatGroupBy,
     include_reasoning_effort: bool,
 ) -> String {
     match group_by {
-        StatGroupBy::Model => {
-            if include_reasoning_effort {
-                model_group_key(record)
-            } else {
-                record.model.to_string()
-            }
-        }
+        StatGroupBy::Model => model_group_key(record, include_reasoning_effort),
         StatGroupBy::Cwd => record.cwd.to_string(),
         StatGroupBy::Account => record
             .account_id
@@ -1083,13 +1176,38 @@ fn group_key(
     }
 }
 
-fn model_group_key(record: &UsageRecordView<'_>) -> String {
-    let effort = record.reasoning_effort.and_then(normalize_reasoning_effort);
+fn model_group_key(record: &UsageRecordView<'_>, include_reasoning_effort: bool) -> String {
+    model_key(
+        record.model,
+        record.usage_mode,
+        record.reasoning_effort,
+        include_reasoning_effort,
+    )
+}
 
-    match effort {
-        Some(effort) if record.model != "unknown" => format!("{}-{}", record.model, effort),
-        _ => record.model.to_string(),
+fn session_event_model_group_key(row: &UsageSessionEventRow) -> String {
+    model_key(&row.model, row.usage_mode, None, false)
+}
+
+fn model_key(
+    model: &str,
+    usage_mode: UsageMode,
+    reasoning_effort: Option<&str>,
+    include_reasoning_effort: bool,
+) -> String {
+    let mut key = model.to_string();
+    if model != "unknown" && usage_mode.is_fast() {
+        key.push_str("-fast");
     }
+
+    if include_reasoning_effort && model != "unknown" {
+        if let Some(effort) = reasoning_effort.and_then(normalize_reasoning_effort) {
+            key.push('-');
+            key.push_str(&effort);
+        }
+    }
+
+    key
 }
 
 fn normalize_reasoning_effort(value: &str) -> Option<String> {
@@ -1326,6 +1444,7 @@ fn escape_double_quoted(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::reports::UsageMode;
     use super::*;
     use chrono::TimeZone;
 
@@ -1448,6 +1567,52 @@ mod tests {
         assert!(row.pricing_stub.contains("\"brand-new-model\""));
     }
 
+    #[test]
+    fn groups_fast_usage_as_distinct_model_key() {
+        let start = utc_time(2026, 5, 10, 0);
+        let end = utc_time(2026, 5, 10, 2);
+        let mut accumulator = UsageStatsAccumulator::new(
+            start,
+            end,
+            StatGroupBy::Model,
+            "/sessions".to_string(),
+            false,
+            None,
+            None,
+        );
+        let normal_usage = usage(10, 2, 12);
+        let fast_usage = usage(20, 4, 24);
+
+        accumulator.add(test_record_with_mode(
+            utc_time(2026, 5, 10, 0),
+            "session-a",
+            "gpt-5.5",
+            UsageMode::Normal,
+            "/repo-a",
+            "/tmp/a.jsonl",
+            &normal_usage,
+        ));
+        accumulator.add(test_record_with_mode(
+            utc_time(2026, 5, 10, 1),
+            "session-b",
+            "gpt-5.5",
+            UsageMode::Fast,
+            "/repo-b",
+            "/tmp/b.jsonl",
+            &fast_usage,
+        ));
+
+        let report = accumulator.finish(None);
+
+        assert_eq!(report.rows.len(), 2);
+        assert!(report.rows.iter().any(|row| row.key == "gpt-5.5"));
+        assert!(report.rows.iter().any(|row| row.key == "gpt-5.5-fast"));
+        assert_eq!(
+            model_key("gpt-5.5", UsageMode::Fast, Some("high"), true),
+            "gpt-5.5-fast-high"
+        );
+    }
+
     fn test_record<'a>(
         timestamp: DateTime<Utc>,
         session_id: &'a str,
@@ -1456,10 +1621,31 @@ mod tests {
         file_path: &'a str,
         usage: &'a TokenUsage,
     ) -> UsageRecordView<'a> {
+        test_record_with_mode(
+            timestamp,
+            session_id,
+            model,
+            UsageMode::Normal,
+            cwd,
+            file_path,
+            usage,
+        )
+    }
+
+    fn test_record_with_mode<'a>(
+        timestamp: DateTime<Utc>,
+        session_id: &'a str,
+        model: &'a str,
+        usage_mode: UsageMode,
+        cwd: &'a str,
+        file_path: &'a str,
+        usage: &'a TokenUsage,
+    ) -> UsageRecordView<'a> {
         UsageRecordView {
             timestamp,
             session_id,
             model,
+            usage_mode,
             reasoning_effort: None,
             cwd,
             account_id: None,

@@ -1,17 +1,18 @@
 mod accumulators;
 mod cli;
 mod events;
+pub(crate) mod fast_candidates;
 mod formatters;
 mod reports;
 mod scan;
 
 pub use crate::time::StatGroupBy;
 pub use cli::{
-    read_usage_records_report, resolve_stat_range_options_from_raw, run_stat_command,
-    ResolvedStatRangeOptions, StatCommandOptions,
+    read_usage_records_report, resolve_stat_range_options_from_raw, run_fast_candidates_command,
+    run_stat_command, ResolvedStatRangeOptions, StatCommandOptions,
 };
 pub use reports::{
-    SkippedEvents, TokenUsage, UsageDiagnostics, UsageRateLimit, UsageRecord,
+    SkippedEvents, TokenUsage, UsageDiagnostics, UsageMode, UsageRateLimit, UsageRecord,
     UsageRecordsReadOptions, UsageRecordsReport,
 };
 
